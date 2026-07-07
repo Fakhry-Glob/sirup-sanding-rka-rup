@@ -1,0 +1,9 @@
+# Ignore excel outputs
+*.xlsx
+
+# Ignore temporary/scratch python scripts
+scratch_*.py
+
+# Ignore node modules if any
+node_modules/
+.DS_Store
