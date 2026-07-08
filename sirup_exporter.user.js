@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @description  Crawl RKA and RUP details from SiRUP and export to a beautifully formatted Excel comparison report with unique RO matching, hierarchical subtotals, inherited NP/Gaji flag propagation, and high-performance concurrency.
 // @author       Antigravity
 // @match        https://sirup.inaproc.id/sirup/*
@@ -431,6 +431,7 @@
             
             for (const p of rupPackets) {
                 const items = rupDetails[p.id] || [];
+                const is_terumumkan = p.aktif && p.fd && p.umumkan;
                 for (const item of items) {
                     const mak = item.mak;
                     const pagu = item.pagu;
@@ -450,7 +451,8 @@
                             subkomp: parsed.subkomp,
                             akun: parsed.akun,
                             comp_key: parsed.comp_key,
-                            key: parsed.key
+                            key: parsed.key,
+                            is_terumumkan: is_terumumkan
                         });
                     }
                 }
@@ -757,7 +759,7 @@
                             const comp_key = `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}`;
                             
                             const rup_sum = rup_all_lines
-                                .filter(line => line.comp_key === comp_key)
+                                .filter(line => line.comp_key === comp_key && line.is_terumumkan)
                                 .reduce((sum, line) => sum + line.pagu, 0);
                             
                             // Hierarchical propagation of NP/Gaji flags
@@ -1277,31 +1279,42 @@
                                             key: `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}.${curr_subkomp}.${curr_akun}`,
                                             allocated_pagu: 0,
                                             matched_ids: [],
-                                            matched_names: []
+                                            matched_names: [],
+                                            is_draft_match: false
                                         });
                                     }
                                 }
                             }
                             
-                            // Create copy of RUP lines to track remaining pagus
-                            const rup_pools = comp_rup_lines.map(line => ({
-                                packet_id: line.packet_id,
-                                packet_name: line.packet_name,
-                                pagu: line.pagu,
-                                remaining_pagu: line.pagu,
-                                key: line.key
-                            }));
+                            // Group RUP lines by their Akun key and separate into Terumumkan and Draft pools
+                            const rup_pools_terumumkan = [];
+                            const rup_pools_draft = [];
+                            for (const line of comp_rup_lines) {
+                                const item = {
+                                    packet_id: line.packet_id,
+                                    packet_name: line.packet_name,
+                                    pagu: line.pagu,
+                                    remaining_pagu: line.pagu,
+                                    key: line.key
+                                };
+                                if (line.is_terumumkan) {
+                                    rup_pools_terumumkan.push(item);
+                                } else {
+                                    rup_pools_draft.push(item);
+                                }
+                            }
                             
                             // Perform Proportional Allocation for each unique Akun key
                             const unique_keys = new Set(detail_row_objects.map(d => d.key));
                             for (const k of unique_keys) {
                                 const k_rka_rows = detail_row_objects.filter(d => d.key === k);
-                                const k_rup_pools = rup_pools.filter(p => p.key === k);
+                                const k_rup_pools_ter = rup_pools_terumumkan.filter(p => p.key === k);
+                                const k_rup_pools_drf = rup_pools_draft.filter(p => p.key === k);
                                 
-                                // Allocate RUP pagu to RKA rows
+                                // 1. First Pass: Allocate Terumumkan RUP
                                 for (const d_obj of k_rka_rows) {
                                     let needed = d_obj.pagu;
-                                    for (const pool of k_rup_pools) {
+                                    for (const pool of k_rup_pools_ter) {
                                         if (pool.remaining_pagu > 0 && needed > 0) {
                                             const amount = Math.min(needed, pool.remaining_pagu);
                                             pool.remaining_pagu -= amount;
@@ -1318,12 +1331,12 @@
                                     }
                                 }
                                 
-                                // If there is leftover RUP pagu, add it to the first RKA row under this key
-                                const leftover = k_rup_pools.reduce((sum, p) => sum + p.remaining_pagu, 0);
+                                // Leftover Terumumkan RUP goes to the first RKA row
+                                const leftover = k_rup_pools_ter.reduce((sum, p) => sum + p.remaining_pagu, 0);
                                 if (leftover > 0 && k_rka_rows.length > 0) {
                                     const first_row = k_rka_rows[0];
                                     first_row.allocated_pagu += leftover;
-                                    for (const pool of k_rup_pools) {
+                                    for (const pool of k_rup_pools_ter) {
                                         if (pool.remaining_pagu > 0) {
                                             if (!first_row.matched_ids.includes(pool.packet_id)) {
                                                 first_row.matched_ids.push(pool.packet_id);
@@ -1332,6 +1345,27 @@
                                                 first_row.matched_names.push(pool.packet_name);
                                             }
                                             pool.remaining_pagu = 0;
+                                        }
+                                    }
+                                }
+                                
+                                // 2. Second Pass: Link remaining unmatched RKA rows to Draft RUPs (warnings)
+                                for (const d_obj of k_rka_rows) {
+                                    if (d_obj.allocated_pagu < d_obj.pagu) {
+                                        for (const pool of k_rup_pools_drf) {
+                                            if (pool.remaining_pagu > 0) {
+                                                d_obj.is_draft_match = true;
+                                                const drf_id = `[DRAFT/BATAL] ${pool.packet_id}`;
+                                                const drf_name = `[Draft/Batal] ${pool.packet_name}`;
+                                                
+                                                if (!d_obj.matched_ids.includes(drf_id)) {
+                                                    d_obj.matched_ids.push(drf_id);
+                                                }
+                                                if (!d_obj.matched_names.includes(drf_name)) {
+                                                    d_obj.matched_names.push(drf_name);
+                                                }
+                                                pool.remaining_pagu = 0; // mark as matched
+                                            }
                                         }
                                     }
                                 }
@@ -1387,14 +1421,15 @@
                                 let matched_pkt_name = "";
                                 let rup_pagu_val = 0;
                                 let is_np_gaji = false;
+                                let is_draft = false;
                                 
                                 if (level === 0) {
-                                    rup_pagu_val = comp_rup_lines.reduce((sum, l) => sum + l.pagu, 0);
+                                    rup_pagu_val = comp_rup_lines.filter(l => l.is_terumumkan).reduce((sum, l) => sum + l.pagu, 0);
                                 } else if (level === 1) {
-                                    rup_pagu_val = comp_rup_lines.filter(l => l.subkomp === subkomp_code).reduce((sum, l) => sum + l.pagu, 0);
+                                    rup_pagu_val = comp_rup_lines.filter(l => l.subkomp === subkomp_code && l.is_terumumkan).reduce((sum, l) => sum + l.pagu, 0);
                                 } else if (level === 2) {
                                     const akun_key = `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}.${subkomp_code}.${code}`;
-                                    rup_pagu_val = comp_rup_lines.filter(l => l.key === akun_key).reduce((sum, l) => sum + l.pagu, 0);
+                                    rup_pagu_val = comp_rup_lines.filter(l => l.key === akun_key && l.is_terumumkan).reduce((sum, l) => sum + l.pagu, 0);
                                 } else if (level === 3) {
                                     const is_np = rows_is_np[row_idx_in_comp] || false;
                                     const is_gj = rows_is_gj[row_idx_in_comp] || false;
@@ -1412,6 +1447,7 @@
                                             matched_pkt_id = d_obj.matched_ids.join(", ");
                                             matched_pkt_name = d_obj.matched_names.join(", ");
                                             rup_pagu_val = d_obj.allocated_pagu;
+                                            is_draft = d_obj.is_draft_match;
                                         }
                                     }
                                 }
@@ -1457,23 +1493,31 @@
                                 
                                 for (let col_c = 5; col_c <= 18; col_c++) {
                                     const cell = ws.getCell(curr_row, col_c);
-                                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: row_fill } };
-                                    cell.border = border_thin;
                                     
+                                    let cell_fill = row_fill;
+                                    let cell_italic = row_font_italic || (level === 3 && matched_pkt_id !== "");
                                     let font_color = 'FF000000';
+                                    
                                     if (level === 3) {
-                                        if (matched_pkt_id === "NP" || matched_pkt_id === "Gaji") {
+                                        if (is_draft && (col_c === 15 || col_c === 16 || col_c === 17)) {
+                                            cell_fill = 'FFFFF2CC'; // light orange background
+                                            font_color = 'FFC95D00'; // dark orange text
+                                            cell_italic = true;
+                                        } else if (matched_pkt_id === "NP" || matched_pkt_id === "Gaji") {
                                             font_color = 'FF7F7F7F'; // soft gray
                                         } else {
                                             font_color = matched_pkt_id ? 'FF2E7D32' : 'FF595959';
                                         }
                                     }
                                     
+                                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: cell_fill } };
+                                    cell.border = border_thin;
+                                    
                                     cell.font = {
                                         name: "Segoe UI",
                                         size: level === 3 ? 9 : 10,
                                         bold: row_font_bold,
-                                        italic: row_font_italic || (level === 3 && matched_pkt_id !== ""),
+                                        italic: cell_italic,
                                         color: { argb: font_color }
                                     };
                                     

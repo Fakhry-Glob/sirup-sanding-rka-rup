@@ -98,6 +98,7 @@ rup_all_lines = []
 for pkt_id, items in rup_details.items():
     packet_info = next((p for p in rup_packets if p["id"] == pkt_id), None)
     packet_name = packet_info["name"] if packet_info else ""
+    is_terumumkan = (packet_info["aktif"] and packet_info["fd"] and packet_info["umumkan"]) if packet_info else False
     
     for item in items:
         mak = item.get("mak", "")
@@ -118,7 +119,8 @@ for pkt_id, items in rup_details.items():
                 "subkomp": parsed["subkomp"],
                 "akun": parsed["akun"],
                 "comp_key": parsed["comp_key"],
-                "key": parsed["key"]
+                "key": parsed["key"],
+                "is_terumumkan": is_terumumkan
             })
 
 # Create workbook
@@ -134,6 +136,7 @@ LIGHT_GRAY_LVL3 = "F9F9F9"
 LIGHT_GREEN = "E2EFDA"
 LIGHT_RED = "FCE4D6"
 WHITE_COLOR = "FFFFFF"
+LIGHT_ORANGE = "FFF2CC"
 
 # Fonts
 font_title = Font(name="Segoe UI", size=16, bold=True, color="1F497D")
@@ -147,6 +150,7 @@ font_lvl3 = Font(name="Segoe UI", size=9, italic=True, color="595959")
 font_hierarchy = Font(name="Segoe UI", size=9, color="333333")
 font_match = Font(name="Segoe UI", size=9, italic=True, color="2E7D32") # green italic for matched rows
 font_np = Font(name="Segoe UI", size=9, italic=True, color="7F7F7F") # gray italic for NP rows
+font_draft = Font(name="Segoe UI", size=9, italic=True, color="C95D00") # Dark Orange for draft/cancelled warning
 
 # Fills
 fill_header = PatternFill(start_color=DARK_BLUE, end_color=DARK_BLUE, fill_type="solid")
@@ -158,6 +162,7 @@ fill_sub_ro = PatternFill(start_color=LIGHT_GRAY_LVL3, end_color=LIGHT_GRAY_LVL3
 
 fill_green = PatternFill(start_color=LIGHT_GREEN, end_color=LIGHT_GREEN, fill_type="solid")
 fill_red = PatternFill(start_color=LIGHT_RED, end_color=LIGHT_RED, fill_type="solid")
+fill_draft = PatternFill(start_color=LIGHT_ORANGE, end_color=LIGHT_ORANGE, fill_type="solid")
 
 # Alignments
 align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -396,7 +401,8 @@ for prog in rka_data:
                 for komp in ro.get("komponens", []):
                     comp_key = f"{prog_code}.{keg['code']}.{out['code']}.{ro['code']}.{komp['code']}"
                     
-                    rup_sum = sum(line["pagu"] for line in rup_all_lines if line["comp_key"] == comp_key)
+                    # Only sum RUP lines that are fully announced (A, FD, U checked)
+                    rup_sum = sum(line["pagu"] for line in rup_all_lines if line["comp_key"] == comp_key and line["is_terumumkan"])
                     
                     # Hierarchical propagation of NP/Gaji flags
                     komp_np = komp_gj = False
@@ -866,30 +872,37 @@ for prog in rka_data:
                                     "key": f"{comp_key}.{curr_subkomp}.{curr_akun}",
                                     "allocated_pagu": 0,
                                     "matched_ids": [],
-                                    "matched_names": []
+                                    "matched_names": [],
+                                    "is_draft_match": False
                                 })
                                 
-                    # Create copy of RUP lines to track remaining pagus
-                    rup_pools = []
+                    # Group RUP lines by their Akun key and separate into Terumumkan and Draft pools
+                    rup_pools_terumumkan = []
+                    rup_pools_draft = []
                     for line in comp_rup_lines:
-                        rup_pools.append({
+                        item = {
                             "packet_id": line["packet_id"],
                             "packet_name": line["packet_name"],
                             "pagu": line["pagu"],
                             "remaining_pagu": line["pagu"],
                             "key": line["key"]
-                        })
-                        
+                        }
+                        if line["is_terumumkan"]:
+                            rup_pools_terumumkan.append(item)
+                        else:
+                            rup_pools_draft.append(item)
+                            
                     # Perform Proportional Allocation for each unique Akun key
                     unique_keys = set(d["key"] for d in detail_row_objects)
                     for k in unique_keys:
                         k_rka_rows = [d for d in detail_row_objects if d["key"] == k]
-                        k_rup_pools = [p for p in rup_pools if p["key"] == k]
+                        k_rup_pools_ter = [p for p in rup_pools_terumumkan if p["key"] == k]
+                        k_rup_pools_drf = [p for p in rup_pools_draft if p["key"] == k]
                         
-                        # Allocate RUP pagu to RKA rows
+                        # 1. First Pass: Allocate Terumumkan RUP
                         for d_obj in k_rka_rows:
                             needed = d_obj["pagu"]
-                            for pool in k_rup_pools:
+                            for pool in k_rup_pools_ter:
                                 if pool["remaining_pagu"] > 0 and needed > 0:
                                     amount = min(needed, pool["remaining_pagu"])
                                     pool["remaining_pagu"] -= amount
@@ -901,18 +914,33 @@ for prog in rka_data:
                                     if pool["packet_name"] not in d_obj["matched_names"]:
                                         d_obj["matched_names"].append(pool["packet_name"])
                                         
-                        # If there is leftover RUP pagu, add it to the first RKA row under this key
-                        leftover = sum(p["remaining_pagu"] for p in k_rup_pools)
+                        # Leftover Terumumkan RUP goes to the first RKA row
+                        leftover = sum(p["remaining_pagu"] for p in k_rup_pools_ter)
                         if leftover > 0 and k_rka_rows:
                             first_row = k_rka_rows[0]
                             first_row["allocated_pagu"] += leftover
-                            for pool in k_rup_pools:
+                            for pool in k_rup_pools_ter:
                                 if pool["remaining_pagu"] > 0:
                                     if pool["packet_id"] not in first_row["matched_ids"]:
                                         first_row["matched_ids"].append(pool["packet_id"])
                                     if pool["packet_name"] not in first_row["matched_names"]:
                                         first_row["matched_names"].append(pool["packet_name"])
                                     pool["remaining_pagu"] = 0
+                                    
+                        # 2. Second Pass: For rows that remain unmatched/partially matched, link to Draft RUPs
+                        for d_obj in k_rka_rows:
+                            if d_obj["allocated_pagu"] < d_obj["pagu"]:
+                                for pool in k_rup_pools_drf:
+                                    if pool["remaining_pagu"] > 0:
+                                        d_obj["is_draft_match"] = True
+                                        drf_id = f"[DRAFT/BATAL] {pool['packet_id']}"
+                                        drf_name = f"[Draft/Batal] {pool['packet_name']}"
+                                        
+                                        if drf_id not in d_obj["matched_ids"]:
+                                            d_obj["matched_ids"].append(drf_id)
+                                        if drf_name not in d_obj["matched_names"]:
+                                            d_obj["matched_names"].append(drf_name)
+                                        pool["remaining_pagu"] = 0
 
                     # --- ITERATE AND WRITE ROWS ---
                     subkomp_code = ""
@@ -961,14 +989,15 @@ for prog in rka_data:
                         matched_pkt_name = ""
                         rup_pagu_val = 0
                         is_np_gaji = False
+                        is_draft = False
                         
                         if level == 0:
-                            rup_pagu_val = sum(line["pagu"] for line in comp_rup_lines)
+                            rup_pagu_val = sum(line["pagu"] for line in comp_rup_lines if line["is_terumumkan"])
                         elif level == 1:
-                            rup_pagu_val = sum(line["pagu"] for line in comp_rup_lines if line["subkomp"] == subkomp_code)
+                            rup_pagu_val = sum(line["pagu"] for line in comp_rup_lines if line["subkomp"] == subkomp_code and line["is_terumumkan"])
                         elif level == 2:
                             akun_key = f"{prog_code}.{keg['code']}.{out['code']}.{ro['code']}.{komp['code']}.{subkomp_code}.{code}"
-                            rup_pagu_val = sum(line["pagu"] for line in comp_rup_lines if line["key"] == akun_key)
+                            rup_pagu_val = sum(line["pagu"] for line in comp_rup_lines if line["key"] == akun_key and line["is_terumumkan"])
                         elif level == 3:
                             is_np = rows_is_np.get(row_idx_in_comp, False)
                             is_gj = rows_is_gj.get(row_idx_in_comp, False)
@@ -986,6 +1015,7 @@ for prog in rka_data:
                                     matched_pkt_id = ", ".join(str(i) for i in d_obj["matched_ids"])
                                     matched_pkt_name = ", ".join(d_obj["matched_names"])
                                     rup_pagu_val = d_obj["allocated_pagu"]
+                                    is_draft = d_obj["is_draft_match"]
                         
                         ws.cell(row=curr_row, column=15, value=matched_pkt_id).alignment = align_center
                         ws.cell(row=curr_row, column=16, value=matched_pkt_name).alignment = align_left
@@ -1019,7 +1049,13 @@ for prog in rka_data:
                         else:
                             row_fill = fill_lvl3
                             row_font = font_lvl3
-                            if matched_pkt_id and matched_pkt_id not in ("NP", "Gaji"):
+                            if is_draft:
+                                for col_idx in (15, 16, 17):
+                                    cell = ws.cell(row=curr_row, column=col_idx)
+                                    cell.fill = fill_draft
+                                    cell.font = font_draft
+                                ws.cell(row=curr_row, column=6).font = font_lvl3
+                            elif matched_pkt_id and matched_pkt_id not in ("NP", "Gaji"):
                                 ws.cell(row=curr_row, column=6).font = font_match
                                 ws.cell(row=curr_row, column=15).font = font_match
                                 ws.cell(row=curr_row, column=16).font = font_match
