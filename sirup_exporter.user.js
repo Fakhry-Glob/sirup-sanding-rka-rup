@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.6
 // @description  Crawl RKA and RUP details from SiRUP and export to a beautifully formatted Excel comparison report with unique RO matching, hierarchical subtotals, inherited NP/Gaji flag propagation, and high-performance concurrency.
 // @author       Antigravity
 // @match        https://sirup.inaproc.id/sirup/*
@@ -1257,7 +1257,7 @@
                                 }
                             }
                             
-                            // --- DETAILED MATCHING FOR LEVEL 3 DETAIL ROWS ---
+                            // --- DETAILED MATCHING FOR LEVEL 3 DETAIL ROWS (PROPORTIONAL ALLOCATION) ---
                             const detail_row_objects = [];
                             let curr_subkomp = "";
                             let curr_akun = "";
@@ -1275,38 +1275,64 @@
                                             r_idx: r_idx,
                                             pagu: typeof r.pagu === 'number' ? r.pagu : 0,
                                             key: `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}.${curr_subkomp}.${curr_akun}`,
-                                            matched: false,
-                                            matched_line: null
+                                            allocated_pagu: 0,
+                                            matched_ids: [],
+                                            matched_names: []
                                         });
                                     }
                                 }
                             }
                             
-                            for (const line of comp_rup_lines) {
-                                line.matched = false;
-                            }
+                            // Create copy of RUP lines to track remaining pagus
+                            const rup_pools = comp_rup_lines.map(line => ({
+                                packet_id: line.packet_id,
+                                packet_name: line.packet_name,
+                                pagu: line.pagu,
+                                remaining_pagu: line.pagu,
+                                key: line.key
+                            }));
                             
-                            // Phase 1: Exact Match (Pagu + Key match)
-                            for (const d_obj of detail_row_objects) {
-                                for (const line of comp_rup_lines) {
-                                    if (!line.matched && line.key === d_obj.key && line.pagu === d_obj.pagu) {
-                                        d_obj.matched = true;
-                                        line.matched = true;
-                                        d_obj.matched_line = line;
-                                        break;
+                            // Perform Proportional Allocation for each unique Akun key
+                            const unique_keys = new Set(detail_row_objects.map(d => d.key));
+                            for (const k of unique_keys) {
+                                const k_rka_rows = detail_row_objects.filter(d => d.key === k);
+                                const k_rup_pools = rup_pools.filter(p => p.key === k);
+                                
+                                // Allocate RUP pagu to RKA rows
+                                for (const d_obj of k_rka_rows) {
+                                    let needed = d_obj.pagu;
+                                    for (const pool of k_rup_pools) {
+                                        if (pool.remaining_pagu > 0 && needed > 0) {
+                                            const amount = Math.min(needed, pool.remaining_pagu);
+                                            pool.remaining_pagu -= amount;
+                                            d_obj.allocated_pagu += amount;
+                                            needed -= amount;
+                                            
+                                            if (!d_obj.matched_ids.includes(pool.packet_id)) {
+                                                d_obj.matched_ids.push(pool.packet_id);
+                                            }
+                                            if (!d_obj.matched_names.includes(pool.packet_name)) {
+                                                d_obj.matched_names.push(pool.packet_name);
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                            
-                            // Phase 2: Sequential Match (Match remaining unmatched RUP lines under the same Akun)
-                            for (const d_obj of detail_row_objects) {
-                                if (d_obj.matched) continue;
-                                for (const line of comp_rup_lines) {
-                                    if (!line.matched && line.key === d_obj.key) {
-                                        d_obj.matched = true;
-                                        line.matched = true;
-                                        d_obj.matched_line = line;
-                                        break;
+                                
+                                // If there is leftover RUP pagu, add it to the first RKA row under this key
+                                const leftover = k_rup_pools.reduce((sum, p) => sum + p.remaining_pagu, 0);
+                                if (leftover > 0 && k_rka_rows.length > 0) {
+                                    const first_row = k_rka_rows[0];
+                                    first_row.allocated_pagu += leftover;
+                                    for (const pool of k_rup_pools) {
+                                        if (pool.remaining_pagu > 0) {
+                                            if (!first_row.matched_ids.includes(pool.packet_id)) {
+                                                first_row.matched_ids.push(pool.packet_id);
+                                            }
+                                            if (!first_row.matched_names.includes(pool.packet_name)) {
+                                                first_row.matched_names.push(pool.packet_name);
+                                            }
+                                            pool.remaining_pagu = 0;
+                                        }
                                     }
                                 }
                             }
@@ -1382,10 +1408,10 @@
                                         matched_pkt_name = "Gaji & Tunjangan Pegawai";
                                     } else {
                                         const d_obj = detail_row_objects.find(d => d.r_idx === row_idx_in_comp);
-                                        if (d_obj && d_obj.matched_line) {
-                                            matched_pkt_id = d_obj.matched_line.packet_id;
-                                            matched_pkt_name = d_obj.matched_line.packet_name;
-                                            rup_pagu_val = d_obj.matched_line.pagu;
+                                        if (d_obj && d_obj.matched_ids && d_obj.matched_ids.length > 0) {
+                                            matched_pkt_id = d_obj.matched_ids.join(", ");
+                                            matched_pkt_name = d_obj.matched_names.join(", ");
+                                            rup_pagu_val = d_obj.allocated_pagu;
                                         }
                                     }
                                 }

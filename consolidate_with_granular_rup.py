@@ -846,7 +846,7 @@ for prog in rka_data:
                         elif lvl == 3 and curr_komp_idx is not None:
                             rows_target[curr_komp_idx] += rows_target[r_idx]
                     
-                    # --- DETAILED MATCHING FOR LEVEL 3 DETAIL ROWS ---
+                    # --- DETAILED MATCHING FOR LEVEL 3 DETAIL ROWS (PROPORTIONAL ALLOCATION) ---
                     detail_row_objects = []
                     curr_subkomp = ""
                     curr_akun = ""
@@ -864,33 +864,55 @@ for prog in rka_data:
                                     "r_idx": r_idx,
                                     "pagu": r["pagu"] if isinstance(r["pagu"], (int, float)) else 0,
                                     "key": f"{comp_key}.{curr_subkomp}.{curr_akun}",
-                                    "matched": False,
-                                    "matched_line": None
+                                    "allocated_pagu": 0,
+                                    "matched_ids": [],
+                                    "matched_names": []
                                 })
                                 
-                    # Mark RUP lines as unmatched
+                    # Create copy of RUP lines to track remaining pagus
+                    rup_pools = []
                     for line in comp_rup_lines:
-                        line["matched"] = False
+                        rup_pools.append({
+                            "packet_id": line["packet_id"],
+                            "packet_name": line["packet_name"],
+                            "pagu": line["pagu"],
+                            "remaining_pagu": line["pagu"],
+                            "key": line["key"]
+                        })
                         
-                    # Phase 1: Exact Match (Pagu + Key match)
-                    for d_obj in detail_row_objects:
-                        for line in comp_rup_lines:
-                            if not line["matched"] and line["key"] == d_obj["key"] and line["pagu"] == d_obj["pagu"]:
-                                d_obj["matched"] = True
-                                line["matched"] = True
-                                d_obj["matched_line"] = line
-                                break
-                                
-                    # Phase 2: Sequential Match (Match remaining unmatched RUP lines under the same Akun)
-                    for d_obj in detail_row_objects:
-                        if d_obj["matched"]:
-                            continue
-                        for line in comp_rup_lines:
-                            if not line["matched"] and line["key"] == d_obj["key"]:
-                                d_obj["matched"] = True
-                                line["matched"] = True
-                                d_obj["matched_line"] = line
-                                break
+                    # Perform Proportional Allocation for each unique Akun key
+                    unique_keys = set(d["key"] for d in detail_row_objects)
+                    for k in unique_keys:
+                        k_rka_rows = [d for d in detail_row_objects if d["key"] == k]
+                        k_rup_pools = [p for p in rup_pools if p["key"] == k]
+                        
+                        # Allocate RUP pagu to RKA rows
+                        for d_obj in k_rka_rows:
+                            needed = d_obj["pagu"]
+                            for pool in k_rup_pools:
+                                if pool["remaining_pagu"] > 0 and needed > 0:
+                                    amount = min(needed, pool["remaining_pagu"])
+                                    pool["remaining_pagu"] -= amount
+                                    d_obj["allocated_pagu"] += amount
+                                    needed -= amount
+                                    
+                                    if pool["packet_id"] not in d_obj["matched_ids"]:
+                                        d_obj["matched_ids"].append(pool["packet_id"])
+                                    if pool["packet_name"] not in d_obj["matched_names"]:
+                                        d_obj["matched_names"].append(pool["packet_name"])
+                                        
+                        # If there is leftover RUP pagu, add it to the first RKA row under this key
+                        leftover = sum(p["remaining_pagu"] for p in k_rup_pools)
+                        if leftover > 0 and k_rka_rows:
+                            first_row = k_rka_rows[0]
+                            first_row["allocated_pagu"] += leftover
+                            for pool in k_rup_pools:
+                                if pool["remaining_pagu"] > 0:
+                                    if pool["packet_id"] not in first_row["matched_ids"]:
+                                        first_row["matched_ids"].append(pool["packet_id"])
+                                    if pool["packet_name"] not in first_row["matched_names"]:
+                                        first_row["matched_names"].append(pool["packet_name"])
+                                    pool["remaining_pagu"] = 0
 
                     # --- ITERATE AND WRITE ROWS ---
                     subkomp_code = ""
@@ -960,10 +982,10 @@ for prog in rka_data:
                                 matched_pkt_name = "Gaji & Tunjangan Pegawai"
                             else:
                                 d_obj = next((d for d in detail_row_objects if d["r_idx"] == row_idx_in_comp), None)
-                                if d_obj and d_obj["matched_line"]:
-                                    matched_pkt_id = d_obj["matched_line"]["packet_id"]
-                                    matched_pkt_name = d_obj["matched_line"]["packet_name"]
-                                    rup_pagu_val = d_obj["matched_line"]["pagu"]
+                                if d_obj and d_obj["matched_ids"]:
+                                    matched_pkt_id = ", ".join(str(i) for i in d_obj["matched_ids"])
+                                    matched_pkt_name = ", ".join(d_obj["matched_names"])
+                                    rup_pagu_val = d_obj["allocated_pagu"]
                         
                         ws.cell(row=curr_row, column=15, value=matched_pkt_id).alignment = align_center
                         ws.cell(row=curr_row, column=16, value=matched_pkt_name).alignment = align_left
