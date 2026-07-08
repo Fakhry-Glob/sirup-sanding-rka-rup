@@ -901,7 +901,7 @@
 
         ws_sanding.getCell('A2').value = `Total Pagu RKA: Rp ${total_satker_pagu.toLocaleString('id')} | Target Pengadaan: Rp ${total_target_pengadaan.toLocaleString('id')} | Terumumkan RUP: Rp ${total_rup_pagu.toLocaleString('id')} (${(tot_pct*100).toFixed(1)}%)`;
         ws_sanding.getCell('A2').font = { name: "Segoe UI", size: 10, italic: true };
-        ws_sanding.merge_cells("A2:N2");
+        ws_sanding.mergeCells("A2:N2");
 
         ws_sanding.getColumn(1).width = 6;
         ws_sanding.getColumn(2).width = 10;
