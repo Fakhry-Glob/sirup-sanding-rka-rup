@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @description  Crawl RKA and RUP details from SiRUP and export to a beautifully formatted Excel comparison report with unique RO matching, hierarchical subtotals, inherited NP/Gaji flag propagation, and high-performance concurrency.
 // @author       Antigravity
 // @match        https://sirup.inaproc.id/sirup/*
@@ -176,6 +176,7 @@
     // Robust MAK parser
     function parseMak(mak) {
         if (!mak) return null;
+        mak = mak.toString().replace(/\s+/g, "").trim();
         const parts = mak.split(".");
         // 9 parts (Tahun.Satker.Prog.Keg.KRO.RO.Komp.Subkomp.Akun)
         if (parts.length >= 9 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
@@ -362,6 +363,21 @@
             const rupRes = await postForm('/sirup/datatablectr/dataruppenyedia2018?tahun=2026', rupBody);
             const rupRows = rupRes.aaData || [];
             
+            // Diagnostic fetch for Swakelola
+            try {
+                const swaRes = await postForm('/sirup/datatablectr/datarupswakelola2018?tahun=2026', rupBody);
+                const swaRows = swaRes.aaData || [];
+                if (swaRows.length > 0) {
+                    console.log("Swakelola Row 0:", swaRows[0]);
+                    log(`[Swakelola Diagnostic] Ditemukan ${swaRows.length} paket. Row 0: ` + JSON.stringify(swaRows[0]).substring(0, 150), 57);
+                } else {
+                    log("[Swakelola Diagnostic] Tidak ada paket swakelola ditemukan.", 57);
+                }
+            } catch (swaErr) {
+                console.error("Swakelola fetch error:", swaErr);
+                log("[Swakelola Diagnostic] Gagal mengambil: " + swaErr.message, 57);
+            }
+            
             const rupPackets = [];
             for (const row of rupRows) {
                 rupPackets.push({
@@ -491,6 +507,7 @@
         const LIGHT_GREEN = "E2EFDA";
         const LIGHT_RED = "FCE4D6";
         const WHITE_COLOR = "FFFFFF";
+        const LIGHT_ORANGE = "FFF2CC";
         
         // Borders template
         const border_thin = {
@@ -499,6 +516,278 @@
             bottom: { style: 'thin', color: { argb: 'FFD3D3D3' } },
             right: { style: 'thin', color: { argb: 'FFD3D3D3' } }
         };
+
+        // --- 0. PRE-CALCULATE ALL TOTALS & STATS ---
+        let total_satker_pagu = 0;
+        let total_non_pengadaan = 0;
+        let total_target_pengadaan = 0;
+        let total_rup_pagu = 0;
+        let tot_pct = 0;
+        
+        // Sum total RKA pagus and non-pengadaan
+        for (const prog of rkaData) {
+            const prog_code = prog.text.split("]")[0].replace("[", "").trim();
+            for (const keg of prog.kegiatans || []) {
+                for (const out of keg.outputs || []) {
+                    const suboutputs = out.suboutputs || [{ id: 0, name: out.name, code: "000", komponens: out.komponens || [] }];
+                    for (const ro of suboutputs) {
+                        for (const komp of ro.komponens || []) {
+                            total_satker_pagu += komp.pagu || 0;
+                            
+                            let komp_np = false, komp_gj = false;
+                            let subkomp_np = false, subkomp_gj = false;
+                            let akun_np = false, akun_gj = false;
+                            
+                            for (const r of komp.rows || []) {
+                                if (r.level === 0) {
+                                    komp_np = r.np_ch;
+                                    komp_gj = r.gj_ch;
+                                } else if (r.level === 1) {
+                                    subkomp_np = r.np_ch;
+                                    subkomp_gj = r.gj_ch;
+                                } else if (r.level === 2) {
+                                    akun_np = r.np_ch;
+                                    akun_gj = r.gj_ch;
+                                } else if (r.level === 3) {
+                                    const is_np = r.np_ch || akun_np || subkomp_np || komp_np;
+                                    const is_gj = r.gj_ch || akun_gj || subkomp_gj || komp_gj;
+                                    if (is_np || is_gj) {
+                                        total_non_pengadaan += typeof r.pagu === 'number' ? r.pagu : 0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        total_target_pengadaan = total_satker_pagu - total_non_pengadaan;
+        
+        // Sum RUP totals (Only fully announced ones)
+        for (const prog of rkaData) {
+            const prog_code = prog.text.split("]")[0].replace("[", "").trim();
+            for (const keg of prog.kegiatans || []) {
+                for (const out of keg.outputs || []) {
+                    const suboutputs = out.suboutputs || [{ id: 0, name: out.name, code: "000", komponens: out.komponens || [] }];
+                    for (const ro of suboutputs) {
+                        for (const komp of ro.komponens || []) {
+                            const comp_key = `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}`;
+                            const comp_rup = rup_all_lines.filter(l => l.comp_key === comp_key && l.is_terumumkan);
+                            total_rup_pagu += comp_rup.reduce((sum, l) => sum + l.pagu, 0);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Gather all RKA detailed Akun keys (7-parts)
+        const rka_detailed_keys = new Set();
+        for (const prog of rkaData) {
+            const prog_code = prog.text.split("]")[0].replace("[", "").trim();
+            for (const keg of prog.kegiatans || []) {
+                for (const out of keg.outputs || []) {
+                    const suboutputs = out.suboutputs || [{ id: 0, name: out.name, code: "000", komponens: out.komponens || [] }];
+                    for (const ro of suboutputs) {
+                        for (const komp of ro.komponens || []) {
+                            const comp_key = `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}`;
+                            let subkomp_code = "";
+                            for (const r of komp.rows || []) {
+                                if (r.level === 1) {
+                                    subkomp_code = r.code;
+                                } else if (r.level === 2) {
+                                    rka_detailed_keys.add(`${comp_key}.${subkomp_code}.${r.code}`);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        const unmatched_rup_lines = [];
+        // Check each line in RUP against 7-part RKA key
+        for (const line of rup_all_lines) {
+            if (!rka_detailed_keys.has(line.key)) {
+                unmatched_rup_lines.push({
+                    packet_id: line.packet_id,
+                    packet_name: line.packet_name,
+                    mak: line.mak,
+                    pagu: line.pagu,
+                    reason: "Mata Anggaran (MAK) tidak ditemukan di RKA (Anggaran dihapus atau salah input)"
+                });
+            }
+        }
+        for (const p of rupPackets) {
+            const p_lines = rup_all_lines.filter(l => l.packet_id === p.id);
+            if (p_lines.length === 0) {
+                const parsed = parseMak(p.mak);
+                if (parsed && !rka_detailed_keys.has(parsed.key)) {
+                    unmatched_rup_lines.push({
+                        packet_id: p.id,
+                        packet_name: p.name,
+                        mak: p.mak || "(Kosong)",
+                        pagu: p.pagu,
+                        reason: "Mata Anggaran (MAK) tidak ditemukan di RKA (Anggaran dihapus atau salah input)"
+                    });
+                } else if (!parsed) {
+                    unmatched_rup_lines.push({
+                        packet_id: p.id,
+                        packet_name: p.name,
+                        mak: p.mak || "(Kosong)",
+                        pagu: p.pagu,
+                        reason: "Format Kode MAK di RUP tidak valid atau kosong"
+                    });
+                }
+            }
+        }
+        // Deduplicate
+        const seen_unmatched = new Set();
+        const unique_unmatched = [];
+        for (const item of unmatched_rup_lines) {
+            const key = `${item.packet_id}_${item.mak}`;
+            if (!seen_unmatched.has(key)) {
+                seen_unmatched.add(key);
+                unique_unmatched.push(item);
+            }
+        }
+        const unique_unmatched_count = unique_unmatched.length;
+
+        // ----------------- SHEET 0: DASHBOARD EVALUASI -----------------
+        const ws_dash = wb.addWorksheet("Dashboard Evaluasi");
+        ws_dash.views = [{ showGridLines: true }];
+        
+        // Title
+        ws_dash.getCell('A1').value = "DASHBOARD MONITORING & EVALUASI INTEGRASI RKA-RUP";
+        ws_dash.getCell('A1').font = { name: "Segoe UI", size: 16, bold: true, color: { argb: 'FF1F497D' } };
+        ws_dash.mergeCells("A1:G1");
+        
+        ws_dash.getCell('A2').value = `Tanggal Ekspor: ${new Date().toLocaleDateString('id-ID')} | Satker: Sekretariat Badan Penyuluhan dan Pengembangan SDM Kelautan dan Perikanan`;
+        ws_dash.getCell('A2').font = { name: "Segoe UI", size: 10, italic: true, color: { argb: 'FF595959' } };
+        ws_dash.mergeCells("A2:G2");
+        
+        // Card 1: TOTAL PAGU SATKER (A4:B6)
+        ws_dash.mergeCells("A4:B4");
+        ws_dash.getCell('A4').value = "TOTAL PAGU SATKER (A)";
+        ws_dash.getCell('A4').font = { name: "Segoe UI", size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
+        ws_dash.getCell('A4').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F497D' } };
+        ws_dash.getCell('A4').alignment = { horizontal: 'center', vertical: 'middle' };
+        
+        ws_dash.mergeCells("A5:B6");
+        ws_dash.getCell('A5').value = total_satker_pagu;
+        ws_dash.getCell('A5').font = { name: "Segoe UI", size: 14, bold: true, color: { argb: 'FF1F497D' } };
+        ws_dash.getCell('A5').numFormat = 'Rp #,##0';
+        ws_dash.getCell('A5').alignment = { horizontal: 'center', vertical: 'middle' };
+        ws_dash.getCell('A5').border = border_thin;
+        
+        // Card 2: TARGET PENGADAAN (C4:D6)
+        ws_dash.mergeCells("C4:D4");
+        ws_dash.getCell('C4').value = "TARGET PENGADAAN (C = A - B)";
+        ws_dash.getCell('C4').font = { name: "Segoe UI", size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
+        ws_dash.getCell('C4').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF203764' } };
+        ws_dash.getCell('C4').alignment = { horizontal: 'center', vertical: 'middle' };
+        
+        ws_dash.mergeCells("C5:D6");
+        ws_dash.getCell('C5').value = total_target_pengadaan;
+        ws_dash.getCell('C5').font = { name: "Segoe UI", size: 14, bold: true, color: { argb: 'FF203764' } };
+        ws_dash.getCell('C5').numFormat = 'Rp #,##0';
+        ws_dash.getCell('C5').alignment = { horizontal: 'center', vertical: 'middle' };
+        ws_dash.getCell('C5').border = border_thin;
+
+        // Card 3: RUP TERUMUMKAN (E4:F6)
+        ws_dash.mergeCells("E4:F4");
+        ws_dash.getCell('E4').value = "RUP TERUMUMKAN (D)";
+        ws_dash.getCell('E4').font = { name: "Segoe UI", size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
+        ws_dash.getCell('E4').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF375623' } };
+        ws_dash.getCell('E4').alignment = { horizontal: 'center', vertical: 'middle' };
+        
+        ws_dash.mergeCells("E5:F6");
+        ws_dash.getCell('E5').value = total_rup_pagu;
+        ws_dash.getCell('E5').font = { name: "Segoe UI", size: 14, bold: true, color: { argb: 'FF375623' } };
+        ws_dash.getCell('E5').numFormat = 'Rp #,##0';
+        ws_dash.getCell('E5').alignment = { horizontal: 'center', vertical: 'middle' };
+        ws_dash.getCell('E5').border = border_thin;
+
+        // Card 4: PERSENTASE CAPAIAN (G4:H6)
+        ws_dash.mergeCells("G4:H4");
+        ws_dash.getCell('G4').value = "PERSENTASE CAPAIAN (%)";
+        ws_dash.getCell('G4').font = { name: "Segoe UI", size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
+        ws_dash.getCell('G4').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7030A0' } };
+        ws_dash.getCell('G4').alignment = { horizontal: 'center', vertical: 'middle' };
+        
+        tot_pct = total_target_pengadaan > 0 ? (total_rup_pagu / total_target_pengadaan) : 0;
+        ws_dash.mergeCells("G5:H6");
+        ws_dash.getCell('G5').value = tot_pct;
+        ws_dash.getCell('G5').font = { name: "Segoe UI", size: 16, bold: true, color: { argb: tot_pct === 1 ? 'FF2E7D32' : 'FFC00000' } };
+        ws_dash.getCell('G5').numFormat = '0.0%';
+        ws_dash.getCell('G5').alignment = { horizontal: 'center', vertical: 'middle' };
+        ws_dash.getCell('G5').border = border_thin;
+
+        // Section Title: Ringkasan Statistik
+        ws_dash.getCell('A8').value = "STATISTIK EVALUASI PAKET RKA-RUP";
+        ws_dash.getCell('A8').font = { name: "Segoe UI", size: 12, bold: true, color: { argb: 'FF1F497D' } };
+        
+        // Table Headers (A10:D10)
+        const stat_headers = ["No", "Indikator Evaluasi Anggaran & RUP", "Nilai / Jumlah", "Satuan"];
+        for (let col = 1; col <= 4; col++) {
+            const cell = ws_dash.getCell(10, col);
+            cell.value = stat_headers[col-1];
+            cell.font = { name: "Segoe UI", size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DARK_BLUE } };
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            cell.border = border_thin;
+        }
+
+        // Stats Rows
+        const stats_data = [
+            ["1", "Total Belanja Non-Pengadaan (NP / Gaji Satker) (B)", total_non_pengadaan, "Rupiah (Rp)"],
+            ["2", "Jumlah Paket RUP Terdaftar (Penyedia)", rupPackets.length, "Paket"],
+            ["3", "Jumlah Paket RUP Sah (Terumumkan KPA)", rupPackets.filter(p => p.aktif && p.fd && p.umumkan).length, "Paket"],
+            ["4", "Jumlah Paket RUP Belum Terumumkan (Draft / Dibatalkan)", rupPackets.filter(p => !(p.aktif && p.fd && p.umumkan)).length, "Paket"],
+            ["5", "Jumlah Paket RUP Kehilangan Sandingan (Potensi Salah Input MAK)", unique_unmatched_count, "Paket"]
+        ];
+
+        for (let i = 0; i < stats_data.length; i++) {
+            const r_idx = 11 + i;
+            const row = stats_data[i];
+            
+            ws_dash.getCell(r_idx, 1).value = row[0];
+            ws_dash.getCell(r_idx, 1).alignment = { horizontal: 'center' };
+            
+            ws_dash.getCell(r_idx, 2).value = row[1];
+            ws_dash.getCell(r_idx, 2).alignment = { horizontal: 'left' };
+            
+            const val_cell = ws_dash.getCell(r_idx, 3);
+            val_cell.value = row[2];
+            if (row[3] === "Rupiah (Rp)") {
+                val_cell.numFormat = '#,##0';
+                val_cell.alignment = { horizontal: 'right' };
+            } else {
+                val_cell.numFormat = '#,##0';
+                val_cell.alignment = { horizontal: 'center' };
+            }
+            
+            ws_dash.getCell(r_idx, 4).value = row[3] === "Rupiah (Rp)" ? "Rupiah (Rp)" : "Paket";
+            ws_dash.getCell(r_idx, 4).alignment = { horizontal: 'center' };
+            
+            for (let c = 1; c <= 4; c++) {
+                const cell = ws_dash.getCell(r_idx, c);
+                cell.font = { name: "Segoe UI", size: 9 };
+                cell.border = border_thin;
+                if (c === 3 && (i === 3 || i === 4) && row[2] > 0) {
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF2CC' } };
+                    cell.font = { name: "Segoe UI", size: 9, bold: true, color: { argb: 'FFC00000' } };
+                }
+            }
+        }
+        
+        ws_dash.getColumn(1).width = 5;
+        ws_dash.getColumn(2).width = 50;
+        ws_dash.getColumn(3).width = 25;
+        ws_dash.getColumn(4).width = 15;
+        ws_dash.getColumn(5).width = 18;
+        ws_dash.getColumn(6).width = 18;
+        ws_dash.getColumn(7).width = 18;
+        ws_dash.getColumn(8).width = 18;
 
         // ----------------- SHEET 1: RINGKASAN PAGU -----------------
         const ws_summary = wb.addWorksheet("Ringkasan Pagu");
@@ -513,7 +802,7 @@
         ws_summary.getCell('A3').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DARK_BLUE } };
         ws_summary.getCell('A3').alignment = { horizontal: 'center', vertical: 'middle' };
         
-        let total_satker_pagu = 0;
+        total_satker_pagu = 0;
         
         const headers_summary = [
             "No", "Kode Program", "Nama Program", "Kode Kegiatan", "Nama Kegiatan",
@@ -720,9 +1009,9 @@
 
         row_idx = 5;
         num = 1;
-        let total_rup_pagu = 0;
-        let total_non_pengadaan = 0;
-        let total_target_pengadaan = 0;
+        total_rup_pagu = 0;
+        total_non_pengadaan = 0;
+        total_target_pengadaan = 0;
         
         const font_sub = { name: "Segoe UI", size: 9, bold: true };
         const font_det = { name: "Segoe UI", size: 9 };
@@ -895,7 +1184,7 @@
         ws_sanding.getCell(row_idx, 12).numFormat = '#,##0';
         ws_sanding.getCell(row_idx, 12).border = border_thin;
 
-        const tot_pct = total_target_pengadaan > 0 ? (total_rup_pagu / total_target_pengadaan) : 0;
+        tot_pct = total_target_pengadaan > 0 ? (total_rup_pagu / total_target_pengadaan) : 0;
         ws_sanding.getCell(row_idx, 13).value = tot_pct;
         ws_sanding.getCell(row_idx, 13).font = { name: "Segoe UI", size: 10, bold: true };
         ws_sanding.getCell(row_idx, 13).numFormat = '0.0%';
@@ -1025,80 +1314,9 @@
             cell.border = border_thin;
         }
 
-        // Gather all RKA detailed Akun keys (7-parts)
-        const rka_detailed_keys = new Set();
-        for (const prog of rkaData) {
-            const prog_code = prog.text.split("]")[0].replace("[", "").trim();
-            for (const keg of prog.kegiatans || []) {
-                for (const out of keg.outputs || []) {
-                    const suboutputs = out.suboutputs || [{ id: 0, name: out.name, code: "000", komponens: out.komponens || [] }];
-                    for (const ro of suboutputs) {
-                        for (const komp of ro.komponens || []) {
-                            const comp_key = `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}`;
-                            let subkomp_code = "";
-                            for (const r of komp.rows || []) {
-                                if (r.level === 1) {
-                                    subkomp_code = r.code;
-                                } else if (r.level === 2) {
-                                    rka_detailed_keys.add(`${comp_key}.${subkomp_code}.${r.code}`);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
-        const unmatched_rup_lines = [];
 
-        // Check each line in RUP against 7-part RKA key
-        for (const line of rup_all_lines) {
-            if (!rka_detailed_keys.has(line.key)) {
-                unmatched_rup_lines.push({
-                    packet_id: line.packet_id,
-                    packet_name: line.packet_name,
-                    mak: line.mak,
-                    pagu: line.pagu,
-                    reason: "Mata Anggaran (MAK) tidak ditemukan di RKA (Anggaran dihapus atau salah input)"
-                });
-            }
-        }
 
-        // Check packets without detailed lines
-        for (const p of rupPackets) {
-            const p_lines = rup_all_lines.filter(l => l.packet_id === p.id);
-            if (p_lines.length === 0) {
-                const parsed = parseMak(p.mak);
-                if (parsed && !rka_detailed_keys.has(parsed.key)) {
-                    unmatched_rup_lines.push({
-                        packet_id: p.id,
-                        packet_name: p.name,
-                        mak: p.mak || "(Kosong)",
-                        pagu: p.pagu,
-                        reason: "Mata Anggaran (MAK) tidak ditemukan di RKA (Anggaran dihapus atau salah input)"
-                    });
-                } else if (!parsed) {
-                    unmatched_rup_lines.push({
-                        packet_id: p.id,
-                        packet_name: p.name,
-                        mak: p.mak || "(Kosong)",
-                        pagu: p.pagu,
-                        reason: "Format Kode MAK di RUP tidak valid atau kosong"
-                    });
-                }
-            }
-        }
-
-        // Remove duplicates based on packet_id and mak
-        const seen = new Set();
-        const unique_unmatched = [];
-        for (const item of unmatched_rup_lines) {
-            const key = `${item.packet_id}_${item.mak}`;
-            if (!seen.has(key)) {
-                seen.add(key);
-                unique_unmatched.push(item);
-            }
-        }
 
         let no_sanding_row = 5;
         for (let idx = 0; idx < unique_unmatched.length; idx++) {
@@ -1147,19 +1365,19 @@
             
             ws.getCell('A1').value = `DETAIL RENCANA KERJA ANGGARAN (RKA) - PROGRAM ${prog_code}`;
             ws.getCell('A1').font = { name: "Segoe UI", size: 16, bold: true, color: { argb: 'FF1F497D' } };
-            ws.mergeCells("A1:R1");
+            ws.mergeCells("A1:S1");
             
             ws.getCell('A3').value = "Program:";
             ws.getCell('A3').font = { name: "Segoe UI", size: 10, bold: true };
             ws.getCell('B3').value = prog.text;
             ws.getCell('B3').font = { name: "Segoe UI", size: 10 };
-            ws.mergeCells("B3:R3");
+            ws.mergeCells("B3:S3");
             
             const headers_det = [
                 "Kegiatan", "KRO (Output)", "RO (Sub-Output)", "Komponen", "Kode (P/K/O/SO/K/SK/A/D)",
                 "Uraian", "Uraian Sebelum Revisi", "Pagu RKA", "Pagu Sebelum Revisi",
                 "P", "S", "Multiyears", "NP", "Gaji",
-                "ID Paket RUP", "Nama Paket RUP", "Pagu RUP (Announced)", "Selisih Pengadaan"
+                "ID Paket RUP", "Nama Paket RUP", "Pagu RUP (Announced)", "Selisih Pengadaan", "Rencana Pemilihan"
             ];
             
             for (let c = 1; c <= headers_det.length; c++) {
@@ -1422,6 +1640,7 @@
                                 let rup_pagu_val = 0;
                                 let is_np_gaji = false;
                                 let is_draft = false;
+                                let matched_pkt_waktu = "";
                                 
                                 if (level === 0) {
                                     rup_pagu_val = comp_rup_lines.filter(l => l.is_terumumkan).reduce((sum, l) => sum + l.pagu, 0);
@@ -1448,12 +1667,24 @@
                                             matched_pkt_name = d_obj.matched_names.join(", ");
                                             rup_pagu_val = d_obj.allocated_pagu;
                                             is_draft = d_obj.is_draft_match;
+                                            
+                                            const matched_times = [];
+                                            for (const id of d_obj.matched_ids) {
+                                                const clean_id = id.toString().replace(/\[DRAFT\/BATAL\] /g, "").trim();
+                                                const pkt = rupPackets.find(p => p.id == clean_id);
+                                                if (pkt && pkt.waktu && !matched_times.includes(pkt.waktu)) {
+                                                    matched_times.push(pkt.waktu);
+                                                }
+                                            }
+                                            matched_pkt_waktu = matched_times.join(", ");
                                         }
                                     }
                                 }
                                 
                                 ws.getCell(curr_row, 15).value = matched_pkt_id;
                                 ws.getCell(curr_row, 16).value = matched_pkt_name;
+                                ws.getCell(curr_row, 19).value = matched_pkt_waktu;
+                                ws.getCell(curr_row, 19).alignment = { horizontal: 'center', vertical: 'middle' };
                                 
                                 const target_pagu = rows_target[row_idx_in_comp] || 0;
                                 
@@ -1491,7 +1722,7 @@
                                     row_font_italic = true;
                                 }
                                 
-                                for (let col_c = 5; col_c <= 18; col_c++) {
+                                for (let col_c = 5; col_c <= 19; col_c++) {
                                     const cell = ws.getCell(curr_row, col_c);
                                     
                                     let cell_fill = row_fill;
@@ -1499,7 +1730,7 @@
                                     let font_color = 'FF000000';
                                     
                                     if (level === 3) {
-                                        if (is_draft && (col_c === 15 || col_c === 16 || col_c === 17)) {
+                                        if (is_draft && (col_c === 15 || col_c === 16 || col_c === 17 || col_c === 19)) {
                                             cell_fill = 'FFFFF2CC'; // light orange background
                                             font_color = 'FFC95D00'; // dark orange text
                                             cell_italic = true;
@@ -1565,6 +1796,8 @@
                 }
             }
             
+            ws.autoFilter = 'E5:S' + (curr_row - 1);
+            
             ws.views = [
                 { state: 'frozen', xSplit: 0, ySplit: 5, activeCell: 'A6' }
             ];
@@ -1583,6 +1816,7 @@
             ws.getColumn(16).width = 30;
             ws.getColumn(17).width = 20;
             ws.getColumn(18).width = 20;
+            ws.getColumn(19).width = 18;
         }
 
         // Save file

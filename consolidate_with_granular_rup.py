@@ -13,6 +13,7 @@ rup_det_path = r"C:\Users\user\.gemini\antigravity\brain\b120cd73-e77b-45ef-a520
 def parse_mak(mak):
     if not mak:
         return None
+    mak = str(mak).replace(" ", "").strip()
     parts = mak.split(".")
     # If prefixed with year and satker code (9 parts)
     if len(parts) >= 9 and parts[0].isdigit() and parts[1].isdigit():
@@ -178,9 +179,235 @@ thin_side = Side(border_style="thin", color="D3D3D3")
 border_cell = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
 
+# --- 0. PRE-CALCULATE ALL TOTALS & STATS ---
+total_satker_pagu = 0
+total_non_pengadaan = 0
+total_target_pengadaan = 0
+total_rup_pagu = 0
+
+# Sum total RKA pagus and non-pengadaan
+for prog in rka_data:
+    prog_code = prog["text"].split("]")[0].replace("[", "").strip()
+    for keg in prog.get("kegiatans", []):
+        for out in keg.get("outputs", []):
+            suboutputs = out.get("suboutputs", []) or [{"id": 0, "name": out["name"], "code": "000", "komponens": out.get("komponens", [])}]
+            for ro in suboutputs:
+                for komp in ro.get("komponens", []):
+                    total_satker_pagu += komp.get("pagu", 0)
+                    
+                    komp_np = False
+                    komp_gj = False
+                    subkomp_np = False
+                    subkomp_gj = False
+                    akun_np = False
+                    akun_gj = False
+                    
+                    for r in komp.get("rows", []):
+                        lvl = r.get("level", 0)
+                        if lvl == 0:
+                            komp_np = r.get("np_ch", False)
+                            komp_gj = r.get("gj_ch", False)
+                        elif lvl == 1:
+                            subkomp_np = r.get("np_ch", False)
+                            subkomp_gj = r.get("gj_ch", False)
+                        elif lvl == 2:
+                            akun_np = r.get("np_ch", False)
+                            akun_gj = r.get("gj_ch", False)
+                        elif lvl == 3:
+                            is_np = r.get("np_ch", False) or akun_np or subkomp_np or komp_np
+                            is_gj = r.get("gj_ch", False) or akun_gj or subkomp_gj or komp_gj
+                            if is_np or is_gj:
+                                total_non_pengadaan += r.get("pagu", 0)
+
+total_target_pengadaan = total_satker_pagu - total_non_pengadaan
+
+# Sum RUP totals (Only fully announced ones)
+for prog in rka_data:
+    prog_code = prog["text"].split("]")[0].replace("[", "").strip()
+    for keg in prog.get("kegiatans", []):
+        for out in keg.get("outputs", []):
+            suboutputs = out.get("suboutputs", []) or [{"id": 0, "name": out["name"], "code": "000", "komponens": out.get("komponens", [])}]
+            for ro in suboutputs:
+                for komp in ro.get("komponens", []):
+                    comp_key = f"{prog_code}.{keg['code']}.{out['code']}.{ro['code']}.{komp['code']}"
+                    comp_rup = [l for l in rup_all_lines if l["comp_key"] == comp_key and l["is_terumumkan"]]
+                    total_rup_pagu += sum(l["pagu"] for l in comp_rup)
+
+# Gather RKA detailed Akun keys (7-parts)
+rka_detailed_keys = set()
+for prog in rka_data:
+    prog_code = prog["text"].split("]")[0].replace("[", "").strip()
+    for keg in prog.get("kegiatans", []):
+        for out in keg.get("outputs", []):
+            suboutputs = out.get("suboutputs", []) or [{"id": 0, "name": out["name"], "code": "000", "komponens": out.get("komponens", [])}]
+            for ro in suboutputs:
+                for komp in ro.get("komponens", []):
+                    comp_key = f"{prog_code}.{keg['code']}.{out['code']}.{ro['code']}.{komp['code']}"
+                    subkomp_code = ""
+                    for r in komp.get("rows", []):
+                        lvl = r.get("level", 0)
+                        if lvl == 1:
+                            subkomp_code = r["code"]
+                        elif lvl == 2:
+                            rka_detailed_keys.add(f"{comp_key}.{subkomp_code}.{r['code']}")
+
+unmatched_rup_lines = []
+for line in rup_all_lines:
+    if line["key"] not in rka_detailed_keys:
+        unmatched_rup_lines.append({"packet_id": line["packet_id"], "mak": line["mak"]})
+for p in rup_packets:
+    p_lines = [l for l in rup_all_lines if l["packet_id"] == p["id"]]
+    if not p_lines:
+        parsed = parse_mak(p["mak"])
+        if parsed and parsed["key"] not in rka_detailed_keys:
+            unmatched_rup_lines.append({"packet_id": p["id"], "mak": p["mak"] or "(Kosong)"})
+        elif not parsed:
+            unmatched_rup_lines.append({"packet_id": p["id"], "mak": p["mak"] or "(Kosong)"})
+
+seen_unmatched = set()
+unique_unmatched = []
+for item in unmatched_rup_lines:
+    k = f"{item['packet_id']}_{item['mak']}"
+    if k not in seen_unmatched:
+        seen_unmatched.add(k)
+        unique_unmatched.append(item)
+unique_unmatched_count = len(unique_unmatched)
+
+# ----------------- SHEET 0: DASHBOARD EVALUASI -----------------
+ws_dash = wb.active
+ws_dash.title = "Dashboard Evaluasi"
+ws_dash.views.sheetView[0].showGridLines = True
+
+ws_dash["A1"] = "DASHBOARD MONITORING & EVALUASI INTEGRASI RKA-RUP"
+ws_dash["A1"].font = font_title
+ws_dash.merge_cells("A1:H1")
+
+ws_dash["A2"] = "Tanggal Ekspor: 08/07/2026 | Satker: Sekretariat Badan Penyuluhan dan Pengembangan SDM Kelautan dan Perikanan"
+ws_dash["A2"].font = Font(name="Segoe UI", size=10, italic=True, color="595959")
+ws_dash.merge_cells("A2:H2")
+
+# Card 1: TOTAL PAGU SATKER (A4:B6)
+ws_dash.merge_cells("A4:B4")
+ws_dash["A4"] = "TOTAL PAGU SATKER (A)"
+ws_dash["A4"].font = Font(name="Segoe UI", size=9, bold=True, color="FFFFFF")
+ws_dash["A4"].fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
+ws_dash["A4"].alignment = align_center
+
+ws_dash.merge_cells("A5:B6")
+ws_dash["A5"] = total_satker_pagu
+ws_dash["A5"].font = Font(name="Segoe UI", size=14, bold=True, color="1F497D")
+ws_dash["A5"].number_format = 'Rp #,##0'
+ws_dash["A5"].alignment = align_center
+for r in range(5, 7):
+    for c in range(1, 3):
+        ws_dash.cell(row=r, column=c).border = border_cell
+
+# Card 2: TARGET PENGADAAN (C4:D6)
+ws_dash.merge_cells("C4:D4")
+ws_dash["C4"] = "TARGET PENGADAAN (C = A - B)"
+ws_dash["C4"].font = Font(name="Segoe UI", size=9, bold=True, color="FFFFFF")
+ws_dash["C4"].fill = PatternFill(start_color="203764", end_color="203764", fill_type="solid")
+ws_dash["C4"].alignment = align_center
+
+ws_dash.merge_cells("C5:D6")
+ws_dash["C5"] = total_target_pengadaan
+ws_dash["C5"].font = Font(name="Segoe UI", size=14, bold=True, color="203764")
+ws_dash["C5"].number_format = 'Rp #,##0'
+ws_dash["C5"].alignment = align_center
+for r in range(5, 7):
+    for c in range(3, 5):
+        ws_dash.cell(row=r, column=c).border = border_cell
+
+# Card 3: RUP TERUMUMKAN (E4:F6)
+ws_dash.merge_cells("E4:F4")
+ws_dash["E4"] = "RUP TERUMUMKAN (D)"
+ws_dash["E4"].font = Font(name="Segoe UI", size=9, bold=True, color="FFFFFF")
+ws_dash["E4"].fill = PatternFill(start_color="375623", end_color="375623", fill_type="solid")
+ws_dash["E4"].alignment = align_center
+
+ws_dash.merge_cells("E5:F6")
+ws_dash["E5"] = total_rup_pagu
+ws_dash["E5"].font = Font(name="Segoe UI", size=14, bold=True, color="375623")
+ws_dash["E5"].number_format = 'Rp #,##0'
+ws_dash["E5"].alignment = align_center
+for r in range(5, 7):
+    for c in range(5, 7):
+        ws_dash.cell(row=r, column=c).border = border_cell
+
+# Card 4: PERSENTASE CAPAIAN (G4:H6)
+ws_dash.merge_cells("G4:H4")
+ws_dash["G4"] = "PERSENTASE CAPAIAN (%)"
+ws_dash["G4"].font = Font(name="Segoe UI", size=9, bold=True, color="FFFFFF")
+ws_dash["G4"].fill = PatternFill(start_color="7030A0", end_color="7030A0", fill_type="solid")
+ws_dash["G4"].alignment = align_center
+
+tot_pct = total_rup_pagu / total_target_pengadaan if total_target_pengadaan > 0 else 0
+ws_dash.merge_cells("G5:H6")
+ws_dash["G5"] = tot_pct
+ws_dash["G5"].font = Font(name="Segoe UI", size=16, bold=True, color="2E7D32" if tot_pct == 1 else "C00000")
+ws_dash["G5"].number_format = '0.0%'
+ws_dash["G5"].alignment = align_center
+for r in range(5, 7):
+    for c in range(7, 9):
+        ws_dash.cell(row=r, column=c).border = border_cell
+
+# Section Title
+ws_dash["A8"] = "STATISTIK EVALUASI PAKET RKA-RUP"
+ws_dash["A8"].font = Font(name="Segoe UI", size=12, bold=True, color="1F497D")
+
+# Table Headers
+stat_headers = ["No", "Indikator Evaluasi Anggaran & RUP", "Nilai / Jumlah", "Satuan"]
+for col in range(1, 5):
+    cell = ws_dash.cell(row=10, column=col)
+    cell.value = stat_headers[col-1]
+    cell.font = font_header
+    cell.fill = fill_header
+    cell.alignment = align_center
+    cell.border = border_cell
+
+# Stats Rows
+stats_data = [
+    ["1", "Total Belanja Non-Pengadaan (NP / Gaji Satker) (B)", total_non_pengadaan, "Rupiah (Rp)"],
+    ["2", "Jumlah Paket RUP Terdaftar (Penyedia)", len(rup_packets), "Paket"],
+    ["3", "Jumlah Paket RUP Sah (Terumumkan KPA)", len([p for p in rup_packets if p["aktif"] and p["fd"] and p["umumkan"]]), "Paket"],
+    ["4", "Jumlah Paket RUP Belum Terumumkan (Draft / Dibatalkan)", len([p for p in rup_packets if not (p["aktif"] and p["fd"] and p["umumkan"])]), "Paket"],
+    ["5", "Jumlah Paket RUP Kehilangan Sandingan (Potensi Salah Input MAK)", unique_unmatched_count, "Paket"]
+]
+
+for i, row in enumerate(stats_data):
+    r_idx = 11 + i
+    ws_dash.cell(row=r_idx, column=1, value=row[0]).alignment = align_center
+    ws_dash.cell(row=r_idx, column=2, value=row[1]).alignment = align_left
+    
+    val_cell = ws_dash.cell(row=r_idx, column=3, value=row[2])
+    if row[3] == "Rupiah (Rp)":
+        val_cell.number_format = '#,##0'
+        val_cell.alignment = align_right
+    else:
+        val_cell.number_format = '#,##0'
+        val_cell.alignment = align_center
+        
+    ws_dash.cell(row=r_idx, column=4, value=row[3]).alignment = align_center
+    
+    for c in range(1, 5):
+        cell = ws_dash.cell(row=r_idx, column=c)
+        cell.font = Font(name="Segoe UI", size=9)
+        cell.border = border_cell
+        if c == 3 and (i == 3 or i == 4) and row[2] > 0:
+            cell.fill = fill_draft
+            cell.font = Font(name="Segoe UI", size=9, bold=True, color="C00000")
+
+ws_dash.column_dimensions['A'].width = 5
+ws_dash.column_dimensions['B'].width = 50
+ws_dash.column_dimensions['C'].width = 25
+ws_dash.column_dimensions['D'].width = 15
+ws_dash.column_dimensions['E'].width = 18
+ws_dash.column_dimensions['F'].width = 18
+ws_dash.column_dimensions['G'].width = 18
+ws_dash.column_dimensions['H'].width = 18
+
 # ----------------- SHEET 1: RINGKASAN PAGU -----------------
-ws_summary = wb.active
-ws_summary.title = "Ringkasan Pagu"
+ws_summary = wb.create_sheet(title="Ringkasan Pagu")
 ws_summary.views.sheetView[0].showGridLines = True
 
 ws_summary["A1"] = "RINGKASAN PAGU ANGGARAN SATKER TAHUN 2026"
@@ -746,19 +973,19 @@ for prog in rka_data:
     # Title
     ws["A1"] = f"DETAIL RENCANA KERJA ANGGARAN (RKA) - PROGRAM {prog_code}"
     ws["A1"].font = font_title
-    ws.merge_cells("A1:R1")
+    ws.merge_cells("A1:S1")
     
     ws["A3"] = "Program:"
     ws["A3"].font = font_meta_label
     ws["B3"] = prog["text"]
     ws["B3"].font = font_meta_val
-    ws.merge_cells("B3:R3")
+    ws.merge_cells("B3:S3")
     
     headers_det = [
         "Kegiatan", "KRO (Output)", "RO (Sub-Output)", "Komponen", "Kode (P/K/O/SO/K/SK/A/D)",
         "Uraian", "Uraian Sebelum Revisi", "Pagu RKA", "Pagu Sebelum Revisi",
         "P", "S", "Multiyears", "NP", "Gaji",
-        "ID Paket RUP", "Nama Paket RUP", "Pagu RUP (Announced)", "Selisih Pengadaan"
+        "ID Paket RUP", "Nama Paket RUP", "Pagu RUP (Announced)", "Selisih Pengadaan", "Rencana Pemilihan"
     ]
     
     # Write Headers
@@ -990,6 +1217,7 @@ for prog in rka_data:
                         rup_pagu_val = 0
                         is_np_gaji = False
                         is_draft = False
+                        matched_pkt_waktu = ""
                         
                         if level == 0:
                             rup_pagu_val = sum(line["pagu"] for line in comp_rup_lines if line["is_terumumkan"])
@@ -1016,26 +1244,31 @@ for prog in rka_data:
                                     matched_pkt_name = ", ".join(d_obj["matched_names"])
                                     rup_pagu_val = d_obj["allocated_pagu"]
                                     is_draft = d_obj["is_draft_match"]
+                                    
+                                    matched_times = []
+                                    for p_id in d_obj["matched_ids"]:
+                                        clean_id = str(p_id).replace("[DRAFT/BATAL] ", "").strip()
+                                        pkt = next((p for p in rup_packets if str(p["id"]) == clean_id), None)
+                                        if pkt and pkt.get("waktu") and pkt["waktu"] not in matched_times:
+                                            matched_times.append(pkt["waktu"])
+                                    matched_pkt_waktu = ", ".join(matched_times)
                         
-                        ws.cell(row=curr_row, column=15, value=matched_pkt_id).alignment = align_center
-                        ws.cell(row=curr_row, column=16, value=matched_pkt_name).alignment = align_left
+                        ws.cell(row=curr_row, column=15, value=matched_pkt_id)
+                        ws.cell(row=curr_row, column=16, value=matched_pkt_name)
+                        ws.cell(row=curr_row, column=19, value=matched_pkt_waktu)
                         
                         target_pagu = rows_target.get(row_idx_in_comp, 0)
                         
                         if is_np_gaji:
                             c_rp = ws.cell(row=curr_row, column=17, value=0)
                             c_rp.number_format = '#,##0'
-                            c_rp.alignment = align_right
                             c_df = ws.cell(row=curr_row, column=18, value=0)
                             c_df.number_format = '#,##0'
-                            c_df.alignment = align_right
                         else:
                             c_rp = ws.cell(row=curr_row, column=17, value=rup_pagu_val)
                             c_rp.number_format = '#,##0'
-                            c_rp.alignment = align_right
                             c_df = ws.cell(row=curr_row, column=18, value=target_pagu - rup_pagu_val)
                             c_df.number_format = '#,##0'
-                            c_df.alignment = align_right
                         
                         if level == 0:
                             row_fill = fill_lvl0
@@ -1049,25 +1282,9 @@ for prog in rka_data:
                         else:
                             row_fill = fill_lvl3
                             row_font = font_lvl3
-                            if is_draft:
-                                for col_idx in (15, 16, 17):
-                                    cell = ws.cell(row=curr_row, column=col_idx)
-                                    cell.fill = fill_draft
-                                    cell.font = font_draft
-                                ws.cell(row=curr_row, column=6).font = font_lvl3
-                            elif matched_pkt_id and matched_pkt_id not in ("NP", "Gaji"):
-                                ws.cell(row=curr_row, column=6).font = font_match
-                                ws.cell(row=curr_row, column=15).font = font_match
-                                ws.cell(row=curr_row, column=16).font = font_match
-                                ws.cell(row=curr_row, column=17).font = font_match
-                            elif is_np_gaji:
-                                ws.cell(row=curr_row, column=6).font = font_np
-                                ws.cell(row=curr_row, column=15).font = font_np
-                                ws.cell(row=curr_row, column=16).font = font_np
-                                ws.cell(row=curr_row, column=17).font = font_np
-                                ws.cell(row=curr_row, column=18).font = font_np
                         
-                        for col_idx in range(5, 19):
+                        # 1. Apply default cell layout and fill styles
+                        for col_idx in range(5, 20):
                             cell = ws.cell(row=curr_row, column=col_idx)
                             cell.fill = row_fill
                             if col_idx < 15:
@@ -1080,8 +1297,29 @@ for prog in rka_data:
                                 cell.alignment = align_with_indent(level)
                             elif col_idx in (8, 9):
                                 cell.alignment = align_right
-                            elif col_idx in (10, 11, 12, 13, 14):
+                            elif col_idx in (10, 11, 12, 13, 14, 19):
                                 cell.alignment = align_center
+                            elif col_idx in (15, 17, 18):
+                                cell.alignment = align_center
+                            elif col_idx == 16:
+                                cell.alignment = align_left
+
+                        # 2. Apply level 3 specific font/fill colors (warning/match/np overrides)
+                        if level == 3:
+                            if is_draft:
+                                for col_idx in (15, 16, 17, 19):
+                                    c = ws.cell(row=curr_row, column=col_idx)
+                                    c.fill = fill_draft
+                                    c.font = font_draft
+                                ws.cell(row=curr_row, column=6).font = font_lvl3
+                            elif matched_pkt_id and matched_pkt_id not in ("NP", "Gaji"):
+                                ws.cell(row=curr_row, column=6).font = font_match
+                                for col_idx in (15, 16, 17, 19):
+                                    ws.cell(row=curr_row, column=col_idx).font = font_match
+                            elif is_np_gaji:
+                                ws.cell(row=curr_row, column=6).font = font_np
+                                for col_idx in range(15, 20):
+                                    ws.cell(row=curr_row, column=col_idx).font = font_np
                         
                         curr_row += 1
                     
@@ -1111,6 +1349,9 @@ for prog in rka_data:
     # Freeze rows 1 to 5
     ws.freeze_panes = "A6"
     
+    # Auto Filter
+    ws.auto_filter.ref = f"E5:S{curr_row - 1}"
+    
     # Dimensions
     ws.column_dimensions['A'].width = 25
     ws.column_dimensions['B'].width = 25
@@ -1128,6 +1369,7 @@ for prog in rka_data:
     ws.column_dimensions['P'].width = 30
     ws.column_dimensions['Q'].width = 20
     ws.column_dimensions['R'].width = 20
+    ws.column_dimensions['S'].width = 18
 
 # Save
 try:
