@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @description  Crawl RKA and RUP details from SiRUP and export to a beautifully formatted Excel comparison report with unique RO matching, hierarchical subtotals, inherited NP/Gaji flag propagation, and high-performance concurrency.
 // @author       Antigravity
 // @match        https://sirup.inaproc.id/sirup/*
@@ -171,6 +171,21 @@
             
         await Promise.all(workers);
         return results;
+    }
+
+    // Helper to parse checkbox values from Datatables cell (boolean, string, or HTML)
+    function parseCheckboxValue(val) {
+        if (val === true || val === "true") return true;
+        if (val === false || val === "false") return false;
+        if (typeof val === 'string') {
+            const lower = val.toLowerCase();
+            if (lower.includes('checkbox') || lower.includes('input')) {
+                return lower.includes('checked');
+            }
+            if (lower.includes('glyphicon-ok')) return true;
+            if (lower.includes('glyphicon-remove')) return false;
+        }
+        return false;
     }
 
     // Robust MAK parser
@@ -380,6 +395,9 @@
             
             const rupPackets = [];
             for (const row of rupRows) {
+                if (row[0] == "63181122" || row[0] == 63181122) {
+                    log(`[DEBUG 63181122] A=${row[6]} FD=${row[7]} U=${row[8]} raw=${JSON.stringify(row)}`, 58);
+                }
                 rupPackets.push({
                     id: row[0],
                     keg_name: row[1],
@@ -387,9 +405,9 @@
                     pagu: parseInt(row[3].toString().replace(/\./g, '')) || 0,
                     waktu: row[4],
                     sumber_dana: row[5],
-                    aktif: row[6] === "true" || row[6] === true, 
-                    fd: row[7] === "true" || row[7] === true, 
-                    umumkan: row[8] === "true" || row[8] === true, 
+                    aktif: parseCheckboxValue(row[6]), 
+                    fd: parseCheckboxValue(row[7]), 
+                    umumkan: parseCheckboxValue(row[8]), 
                     mak: row[13] || ""
                 });
             }
