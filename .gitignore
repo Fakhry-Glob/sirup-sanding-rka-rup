@@ -6,4 +6,6 @@ scratch_*.py
 
 # Ignore node modules if any
 node_modules/
+package-lock.json
 .DS_Store
+Thumbs.db

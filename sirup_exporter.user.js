@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      1.9
-// @description  Crawl RKA and RUP details from SiRUP and export to a beautifully formatted Excel comparison report with unique RO matching, hierarchical subtotals, inherited NP/Gaji flag propagation, and high-performance concurrency.
-// @author       Antigravity
+// @version      2.0
+// @description  Crawl RKA dan RUP dari SiRUP, lalu ekspor jadi laporan sanding Excel (dashboard, ringkasan, sanding berjenjang, detail per program). Tahun anggaran & satker terdeteksi otomatis.
+// @author       Fakhry-Glob
 // @match        https://sirup.inaproc.id/sirup/*
 // @require      https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js
@@ -15,117 +15,489 @@
 (function() {
     'use strict';
 
-    // Inject export button into the page
+    // ═════════════════════════════════════════════════════════ KONFIGURASI ══
+    const APP_TITLE = 'Sanding RKA & RUP';
+    const APP_VERSION = '2.0';
+
+    // Konteks runtime: diisi otomatis oleh detectContext(), bisa dikoreksi
+    // pengguna lewat panel pra-ekspor sebelum crawling dimulai.
+    const ctx = {
+        tahun: new Date().getFullYear(),
+        satkerId: '',
+        satkerName: ''
+    };
+
+    let abortRequested = false;
+    function throwIfAborted() {
+        if (abortRequested) throw new Error('Proses dibatalkan oleh pengguna.');
+    }
+
+    // ═══════════════════════════════════════════════════════════════ STYLE ══
+    const CSS = `
+    .srx, .srx *, .srx *::before, .srx *::after { box-sizing: border-box; }
+    .srx { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: #0f172a; }
+
+    .srx-fab {
+        position: fixed; right: 24px; bottom: 24px; z-index: 99990;
+        display: inline-flex; align-items: center; gap: 9px;
+        padding: 12px 20px; border: 0; border-radius: 999px; cursor: pointer;
+        font: 600 14px/1 "Segoe UI", system-ui, sans-serif; color: #fff;
+        background: linear-gradient(135deg, #1F497D 0%, #2E6DA4 100%);
+        box-shadow: 0 6px 18px rgba(31,73,125,.35);
+        transition: transform .15s ease, box-shadow .15s ease;
+    }
+    .srx-fab:hover { transform: translateY(-2px); box-shadow: 0 10px 26px rgba(31,73,125,.45); }
+    .srx-fab:active { transform: translateY(0); }
+    .srx-fab svg { width: 17px; height: 17px; flex: none; }
+
+    .srx-overlay {
+        position: fixed; inset: 0; z-index: 99991;
+        background: rgba(15,23,42,.55); backdrop-filter: blur(2px);
+        display: flex; align-items: center; justify-content: center; padding: 20px;
+        animation: srx-fade .18s ease;
+    }
+    @keyframes srx-fade { from { opacity: 0 } to { opacity: 1 } }
+
+    .srx-dialog {
+        width: 640px; max-width: 100%; max-height: 90vh; overflow: hidden;
+        display: flex; flex-direction: column;
+        background: #fff; border-radius: 14px;
+        box-shadow: 0 24px 60px rgba(2,6,23,.35);
+        animation: srx-pop .2s cubic-bezier(.2,.8,.3,1);
+    }
+    @keyframes srx-pop { from { opacity: 0; transform: translateY(12px) scale(.98) } to { opacity: 1; transform: none } }
+
+    .srx-head {
+        padding: 18px 22px; color: #fff;
+        background: linear-gradient(135deg, #1F497D 0%, #2E6DA4 100%);
+        display: flex; align-items: flex-start; gap: 12px;
+    }
+    .srx-head h3 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: .2px; }
+    .srx-head p  { margin: 3px 0 0; font-size: 12px; opacity: .82; }
+    .srx-ver {
+        margin-left: auto; flex: none; font-size: 11px; font-weight: 600;
+        padding: 3px 9px; border-radius: 999px; background: rgba(255,255,255,.18);
+    }
+
+    .srx-body { padding: 18px 22px; overflow-y: auto; }
+    .srx-foot {
+        padding: 13px 22px; border-top: 1px solid #e2e8f0; background: #f8fafc;
+        display: flex; align-items: center; gap: 10px;
+    }
+    .srx-foot .srx-spacer { margin-left: auto; }
+
+    .srx-btn {
+        padding: 9px 18px; border-radius: 8px; border: 1px solid transparent;
+        font: 600 13px/1.2 "Segoe UI", system-ui, sans-serif; cursor: pointer;
+        transition: background .15s ease, border-color .15s ease, opacity .15s ease;
+    }
+    .srx-btn:disabled { opacity: .5; cursor: not-allowed; }
+    .srx-btn-primary { background: #1F497D; color: #fff; }
+    .srx-btn-primary:hover:not(:disabled) { background: #17395f; }
+    .srx-btn-ghost { background: #fff; color: #475569; border-color: #cbd5e1; }
+    .srx-btn-ghost:hover:not(:disabled) { background: #f1f5f9; }
+    .srx-btn-danger { background: #fff; color: #b91c1c; border-color: #fca5a5; }
+    .srx-btn-danger:hover:not(:disabled) { background: #fef2f2; }
+
+    .srx-field { margin-bottom: 15px; }
+    .srx-field:last-child { margin-bottom: 0; }
+    .srx-label { display: block; font-size: 12px; font-weight: 600; color: #334155; margin-bottom: 5px; }
+    .srx-hint  { font-size: 11px; color: #64748b; margin-top: 5px; line-height: 1.45; }
+    .srx-input, .srx-select {
+        width: 100%; padding: 9px 11px; border: 1px solid #cbd5e1; border-radius: 8px;
+        font: 400 13px/1.3 "Segoe UI", system-ui, sans-serif; color: #0f172a; background: #fff;
+    }
+    .srx-input:focus, .srx-select:focus { outline: 2px solid #93c5fd; outline-offset: -1px; border-color: #2E6DA4; }
+    .srx-grid { display: grid; grid-template-columns: 160px 1fr; gap: 14px; }
+
+    .srx-note {
+        display: flex; gap: 9px; padding: 10px 12px; border-radius: 8px;
+        background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;
+        font-size: 12px; line-height: 1.5;
+    }
+
+    .srx-steps { display: flex; margin: 0 0 16px; padding: 0; list-style: none; }
+    .srx-steps li {
+        flex: 1; position: relative; text-align: center;
+        font-size: 11px; font-weight: 600; color: #94a3b8; padding-top: 24px;
+    }
+    .srx-steps li::before {
+        content: ''; position: absolute; top: 5px; left: 50%; transform: translateX(-50%);
+        width: 12px; height: 12px; border-radius: 50%;
+        background: #fff; border: 2px solid #cbd5e1; z-index: 1;
+    }
+    .srx-steps li::after {
+        content: ''; position: absolute; top: 10px; left: 50%; width: 100%; height: 2px; background: #e2e8f0;
+    }
+    .srx-steps li:last-child::after { display: none; }
+    .srx-steps li.done { color: #1F497D; }
+    .srx-steps li.done::before { background: #1F497D; border-color: #1F497D; }
+    .srx-steps li.done::after  { background: #1F497D; }
+    .srx-steps li.active { color: #1F497D; }
+    .srx-steps li.active::before {
+        background: #2E6DA4; border-color: #2E6DA4;
+        box-shadow: 0 0 0 4px rgba(46,109,164,.2); animation: srx-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes srx-pulse { 50% { box-shadow: 0 0 0 7px rgba(46,109,164,.08) } }
+
+    .srx-progress-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .srx-track { flex: 1; height: 9px; border-radius: 999px; background: #e2e8f0; overflow: hidden; }
+    .srx-bar {
+        height: 100%; width: 0%; border-radius: 999px;
+        background: linear-gradient(90deg, #1F497D, #2E6DA4);
+        transition: width .35s ease;
+    }
+    .srx-bar.running {
+        background-image: linear-gradient(90deg, #1F497D, #2E6DA4),
+            repeating-linear-gradient(45deg, rgba(255,255,255,.18) 0 8px, transparent 8px 16px);
+        background-blend-mode: overlay;
+        animation: srx-stripe 1s linear infinite;
+    }
+    @keyframes srx-stripe { to { background-position: 32px 0, 0 0 } }
+    .srx-bar.ok   { background: linear-gradient(90deg, #15803d, #22c55e); }
+    .srx-bar.fail { background: linear-gradient(90deg, #b91c1c, #ef4444); }
+    .srx-pct   { font: 700 13px/1 "Segoe UI", monospace; color: #1F497D; min-width: 42px; text-align: right; }
+    .srx-timer { font: 400 12px/1 "Segoe UI", monospace; color: #64748b; min-width: 46px; text-align: right; }
+
+    .srx-log {
+        height: 224px; overflow-y: auto; padding: 6px;
+        border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc;
+    }
+    .srx-log p {
+        margin: 0; padding: 4px 9px; font-size: 12px; line-height: 1.45; color: #334155;
+        border-left: 3px solid transparent; border-radius: 3px; word-break: break-word;
+    }
+    .srx-log p.warn    { color: #92400e; background: #fffbeb; border-left-color: #f59e0b; }
+    .srx-log p.error   { color: #991b1b; background: #fef2f2; border-left-color: #ef4444; font-weight: 600; }
+    .srx-log p.success { color: #166534; background: #f0fdf4; border-left-color: #22c55e; font-weight: 600; }
+    .srx-log p.step    { color: #1e3a8a; background: #eff6ff; border-left-color: #2E6DA4; font-weight: 600; margin-top: 3px; }
+
+    .srx-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+    .srx-card { padding: 11px 13px; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; }
+    .srx-card span { display: block; font-size: 10.5px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: .4px; }
+    .srx-card strong { display: block; margin-top: 4px; font-size: 17px; font-weight: 700; color: #1F497D; }
+    `;
+
+    function injectStyles() {
+        if (document.getElementById('srx-style')) return;
+        const el = document.createElement('style');
+        el.id = 'srx-style';
+        el.textContent = CSS;
+        (document.head || document.documentElement).appendChild(el);
+    }
+
+    // ══════════════════════════════════════════════════════ DETEKSI KONTEKS ══
+    function findSatkerSelect() {
+        return document.querySelector('#idSatker, select[name="idSatker"], #satker, #id_satker');
+    }
+
+    function findTahunSelect() {
+        return document.querySelector('#tahunAnggaran, select[name="tahunAnggaran"], #tahun, select[name="tahun"]');
+    }
+
+    function detectTahun() {
+        const sel = findTahunSelect();
+        if (sel && /^\d{4}$/.test(String(sel.value || '').trim())) return parseInt(sel.value, 10);
+
+        const fromUrl = new URLSearchParams(location.search).get('tahun');
+        if (fromUrl && /^\d{4}$/.test(fromUrl)) return parseInt(fromUrl, 10);
+
+        const m = (document.body.innerText || '').match(/Tahun\s*Anggaran\s*[:\-]?\s*(20\d{2})/i);
+        if (m) return parseInt(m[1], 10);
+
+        return new Date().getFullYear();
+    }
+
+    function detectSatker() {
+        let id = '', name = '';
+
+        const sel = findSatkerSelect();
+        if (sel) {
+            id = String(sel.value || '').trim();
+            const opt = sel.options ? sel.options[sel.selectedIndex] : null;
+            if (opt && opt.text) name = opt.text.trim();
+        }
+        if (!id) {
+            const p = new URLSearchParams(location.search);
+            id = p.get('idSatker') || p.get('satker') || p.get('id_satker') || '';
+        }
+        if (!name) {
+            const el = document.querySelector('#namaSatker, .satker-name, .nama-satker');
+            if (el) name = el.innerText.trim();
+        }
+        if (!name) {
+            const m = (document.body.innerText || '').match(/Satuan\s*Kerja\s*[:\-]\s*([^\n\r]{4,120})/i);
+            if (m) name = m[1].trim();
+        }
+        return { id, name };
+    }
+
+    function detectContext() {
+        ctx.tahun = detectTahun();
+        const s = detectSatker();
+        ctx.satkerId = s.id;
+        ctx.satkerName = s.name;
+    }
+
+    function tahunOptions() {
+        const opts = new Set();
+        const sel = findTahunSelect();
+        if (sel) {
+            Array.from(sel.options || []).forEach(o => {
+                const v = String(o.value || '').trim();
+                if (/^\d{4}$/.test(v)) opts.add(parseInt(v, 10));
+            });
+        }
+        const now = new Date().getFullYear();
+        [now - 1, now, now + 1].forEach(y => opts.add(y));
+        opts.add(ctx.tahun);
+        return Array.from(opts).sort((a, b) => b - a);
+    }
+
+    // ═══════════════════════════════════════════════════════════════ TOMBOL ══
     function injectButton() {
-        if (document.getElementById('btn-export-sanding')) return;
+        if (document.getElementById('srx-fab')) return;
+        injectStyles();
 
         const btn = document.createElement('button');
-        btn.id = 'btn-export-sanding';
-        btn.className = 'btn btn-primary';
-        btn.style.position = 'fixed';
-        btn.style.bottom = '20px';
-        btn.style.right = '20px';
-        btn.style.zIndex = '9999';
-        btn.style.boxShadow = '0 4px 10px rgba(0,0,0,0.2)';
-        btn.style.borderRadius = '50px';
-        btn.style.padding = '12px 24px';
-        btn.style.fontSize = '14px';
-        btn.style.fontWeight = 'bold';
-        btn.style.border = 'none';
-        btn.style.backgroundColor = '#1F497D';
-        btn.style.color = '#ffffff';
-        btn.style.cursor = 'pointer';
-        btn.innerHTML = '📊 Ekspor Sanding RKA & RUP';
-        
-        btn.addEventListener('click', startExport);
+        btn.id = 'srx-fab';
+        btn.type = 'button';
+        btn.className = 'srx srx-fab';
+        btn.title = 'Ekspor sanding RKA & RUP ke Excel';
+        btn.innerHTML =
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+            'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+            '<path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="7"/>' +
+            '<rect x="12" y="7" width="3" height="11"/><rect x="17" y="13" width="3" height="5"/></svg>' +
+            '<span>Ekspor Sanding RKA &amp; RUP</span>';
+
+        btn.addEventListener('click', openPanel);
         document.body.appendChild(btn);
     }
 
-    // Modal/Progress Logger UI
-    let logModal, logContent, progressBar;
-    function showLogger() {
-        if (!logModal) {
-            logModal = document.createElement('div');
-            logModal.style.position = 'fixed';
-            logModal.style.top = '50%';
-            logModal.style.left = '50%';
-            logModal.style.transform = 'translate(-50%, -50%)';
-            logModal.style.width = '550px';
-            logModal.style.maxHeight = '450px';
-            logModal.style.backgroundColor = '#ffffff';
-            logModal.style.border = '1px solid #ccc';
-            logModal.style.boxShadow = '0 10px 25px rgba(0,0,0,0.3)';
-            logModal.style.borderRadius = '8px';
-            logModal.style.padding = '20px';
-            logModal.style.zIndex = '10000';
-            logModal.style.fontFamily = '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif';
+    // ══════════════════════════════════════════════════ PANEL PRA-EKSPOR ══
+    function closeOverlay() {
+        const el = document.getElementById('srx-overlay');
+        if (el) el.remove();
+        document.removeEventListener('keydown', onEsc);
+    }
 
-            const header = document.createElement('h4');
-            header.style.margin = '0 0 15px 0';
-            header.style.color = '#1F497D';
-            header.innerText = 'Proses Sinkronisasi & Ekspor RKA-RUP';
-            logModal.appendChild(header);
-
-            const progressContainer = document.createElement('div');
-            progressContainer.style.width = '100%';
-            progressContainer.style.backgroundColor = '#f1f1f1';
-            progressContainer.style.borderRadius = '4px';
-            progressContainer.style.marginBottom = '15px';
-            
-            progressBar = document.createElement('div');
-            progressBar.style.width = '0%';
-            progressBar.style.height = '15px';
-            progressBar.style.backgroundColor = '#1F497D';
-            progressBar.style.borderRadius = '4px';
-            progressBar.style.transition = 'width 0.3s ease';
-            progressContainer.appendChild(progressBar);
-            logModal.appendChild(progressContainer);
-
-            logContent = document.createElement('div');
-            logContent.style.height = '220px';
-            logContent.style.overflowY = 'auto';
-            logContent.style.fontSize = '12px';
-            logContent.style.border = '1px solid #eee';
-            logContent.style.padding = '10px';
-            logContent.style.backgroundColor = '#fafafa';
-            logContent.style.lineHeight = '1.5';
-            logModal.appendChild(logContent);
-
-            const backdrop = document.createElement('div');
-            backdrop.id = 'export-backdrop';
-            backdrop.style.position = 'fixed';
-            backdrop.style.top = '0';
-            backdrop.style.left = '0';
-            backdrop.style.width = '100%';
-            backdrop.style.height = '100%';
-            backdrop.style.backgroundColor = 'rgba(0,0,0,0.5)';
-            backdrop.style.zIndex = '9998';
-            document.body.appendChild(backdrop);
-            document.body.appendChild(logModal);
-        } else {
-            logModal.style.display = 'block';
-            document.getElementById('export-backdrop').style.display = 'block';
-            logContent.innerHTML = '';
-            progressBar.style.width = '0%';
+    function onEsc(e) {
+        if (e.key === 'Escape') {
+            const dlg = document.getElementById('srx-overlay');
+            if (dlg && dlg.dataset.closable === '1') closeOverlay();
         }
     }
 
-    function log(message, progress = null) {
+    function buildOverlay(headTitle, headSub, bodyHtml, closable) {
+        closeOverlay();
+        const overlay = document.createElement('div');
+        overlay.id = 'srx-overlay';
+        overlay.className = 'srx srx-overlay';
+        overlay.dataset.closable = closable ? '1' : '0';
+        overlay.innerHTML =
+            '<div class="srx-dialog" role="dialog" aria-modal="true">' +
+                '<div class="srx-head">' +
+                    '<div><h3>' + headTitle + '</h3><p>' + headSub + '</p></div>' +
+                    '<span class="srx-ver">v' + APP_VERSION + '</span>' +
+                '</div>' +
+                '<div class="srx-body">' + bodyHtml + '</div>' +
+                '<div class="srx-foot"></div>' +
+            '</div>';
+        document.body.appendChild(overlay);
+        document.addEventListener('keydown', onEsc);
+        return overlay;
+    }
+
+    function openPanel() {
+        detectContext();
+        injectStyles();
+
+        const years = tahunOptions()
+            .map(y => '<option value="' + y + '"' + (y === ctx.tahun ? ' selected' : '') + '>' + y + '</option>')
+            .join('');
+
+        const overlay = buildOverlay(
+            'Ekspor ' + APP_TITLE,
+            'Periksa dulu tahun anggaran & satker, lalu jalankan penarikan data.',
+            '<div class="srx-field srx-grid">' +
+                '<label class="srx-label" for="srx-tahun">Tahun Anggaran</label>' +
+                '<div><select class="srx-select" id="srx-tahun">' + years + '</select>' +
+                '<div class="srx-hint">Dipakai untuk menarik daftar paket RUP. Terdeteksi otomatis dari halaman ini.</div></div>' +
+            '</div>' +
+            '<div class="srx-field srx-grid">' +
+                '<label class="srx-label" for="srx-satker">Nama Satker</label>' +
+                '<div><input class="srx-input" id="srx-satker" type="text" placeholder="Nama satuan kerja" value="' +
+                    String(ctx.satkerName || '').replace(/"/g, '&quot;') + '">' +
+                '<div class="srx-hint">Muncul di kop setiap sheet laporan. ID Satker aktif: <b>' +
+                    (ctx.satkerId || 'bawaan sesi login') + '</b></div></div>' +
+            '</div>' +
+            '<div class="srx-note">' +
+                '<span>&#9432;</span>' +
+                '<span>Penarikan data membaca seluruh Program &rarr; Kegiatan &rarr; KRO &rarr; RO &rarr; Komponen ' +
+                'beserta detail tiap paket RUP. Untuk satker besar prosesnya bisa beberapa menit — biarkan tab ini terbuka.</span>' +
+            '</div>',
+            true
+        );
+
+        const foot = overlay.querySelector('.srx-foot');
+        foot.innerHTML =
+            '<span class="srx-spacer"></span>' +
+            '<button type="button" class="srx-btn srx-btn-ghost" id="srx-cancel">Batal</button>' +
+            '<button type="button" class="srx-btn srx-btn-primary" id="srx-start">Mulai Ekspor</button>';
+
+        overlay.querySelector('#srx-cancel').addEventListener('click', closeOverlay);
+        overlay.querySelector('#srx-start').addEventListener('click', () => {
+            ctx.tahun = parseInt(overlay.querySelector('#srx-tahun').value, 10) || new Date().getFullYear();
+            ctx.satkerName = overlay.querySelector('#srx-satker').value.trim();
+            startExport();
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════ PANEL PROGRES ══
+    const STEPS = ['Persiapan', 'Tarik RKA', 'Tarik RUP', 'Menyanding', 'Susun Excel'];
+    let ui = null;
+    let startedAt = 0;
+    let timerId = null;
+
+    function stepForProgress(p) {
+        if (p == null) return null;
+        if (p < 10) return 0;
+        if (p < 50) return 1;
+        if (p < 85) return 2;
+        if (p < 90) return 3;
+        return 4;
+    }
+
+    function classifyMessage(msg) {
+        const m = String(msg);
+        if (/^ERROR|gagal|error/i.test(m)) return 'error';
+        if (/\[Swakelola|peringatan|tidak ditemukan|dibatalkan/i.test(m)) return 'warn';
+        if (/berhasil|selesai!/i.test(m)) return 'success';
+        if (/^\[RKA\]|^\[RUP\]|^Memproses|^Membangun|^Mengambil/i.test(m)) return 'step';
+        return 'info';
+    }
+
+    function fmtElapsed(ms) {
+        const s = Math.floor(ms / 1000);
+        return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+    }
+
+    function showLogger() {
+        abortRequested = false;
+        injectStyles();
+
+        const overlay = buildOverlay(
+            'Memproses ' + APP_TITLE,
+            'Tahun ' + ctx.tahun + (ctx.satkerName ? ' • ' + ctx.satkerName : ''),
+            '<ul class="srx-steps">' + STEPS.map(s => '<li>' + s + '</li>').join('') + '</ul>' +
+            '<div class="srx-progress-row">' +
+                '<div class="srx-track"><div class="srx-bar running"></div></div>' +
+                '<div class="srx-pct">0%</div><div class="srx-timer">00:00</div>' +
+            '</div>' +
+            '<div class="srx-log"></div>',
+            false
+        );
+
+        const foot = overlay.querySelector('.srx-foot');
+        foot.innerHTML =
+            '<span class="srx-spacer"></span>' +
+            '<button type="button" class="srx-btn srx-btn-danger" id="srx-abort">Hentikan</button>';
+        foot.querySelector('#srx-abort').addEventListener('click', (e) => {
+            abortRequested = true;
+            e.target.disabled = true;
+            log('Permintaan berhenti diterima, menunggu proses berjalan selesai...', null, 'warn');
+        });
+
+        ui = {
+            overlay,
+            bar: overlay.querySelector('.srx-bar'),
+            pct: overlay.querySelector('.srx-pct'),
+            timer: overlay.querySelector('.srx-timer'),
+            logBox: overlay.querySelector('.srx-log'),
+            steps: Array.from(overlay.querySelectorAll('.srx-steps li')),
+            foot
+        };
+
+        startedAt = Date.now();
+        clearInterval(timerId);
+        timerId = setInterval(() => {
+            if (ui) ui.timer.textContent = fmtElapsed(Date.now() - startedAt);
+        }, 1000);
+
+        setStep(0);
+    }
+
+    function setStep(idx) {
+        if (!ui) return;
+        ui.steps.forEach((li, i) => {
+            li.classList.toggle('done', i < idx);
+            li.classList.toggle('active', i === idx);
+        });
+    }
+
+    function log(message, progress = null, type = null) {
+        if (!ui) return;
         const p = document.createElement('p');
-        p.style.margin = '3px 0';
-        p.innerText = message;
-        logContent.appendChild(p);
-        logContent.scrollTop = logContent.scrollHeight;
+        p.className = type || classifyMessage(message);
+        p.textContent = message;
+        ui.logBox.appendChild(p);
+        ui.logBox.scrollTop = ui.logBox.scrollHeight;
+
         if (progress !== null) {
-            progressBar.style.width = progress + '%';
+            const pct = Math.max(0, Math.min(100, Math.round(progress)));
+            ui.bar.style.width = pct + '%';
+            ui.pct.textContent = pct + '%';
+            const s = stepForProgress(progress);
+            if (s !== null) setStep(s);
         }
+    }
+
+    function finishSuccess(cards) {
+        if (!ui) return;
+        clearInterval(timerId);
+        ui.bar.classList.remove('running');
+        ui.bar.classList.add('ok');
+        ui.bar.style.width = '100%';
+        ui.pct.textContent = '100%';
+        ui.steps.forEach(li => { li.classList.remove('active'); li.classList.add('done'); });
+
+        if (cards && cards.length) {
+            const box = document.createElement('div');
+            box.className = 'srx-summary';
+            box.innerHTML = cards
+                .map(c => '<div class="srx-card"><span>' + c.label + '</span><strong>' + c.value + '</strong></div>')
+                .join('');
+            ui.logBox.parentNode.insertBefore(box, ui.logBox);
+        }
+
+        ui.foot.innerHTML =
+            '<span class="srx-spacer"></span>' +
+            '<button type="button" class="srx-btn srx-btn-primary" id="srx-done">Selesai</button>';
+        ui.foot.querySelector('#srx-done').addEventListener('click', hideLogger);
+        ui.overlay.dataset.closable = '1';
+    }
+
+    function finishError(err) {
+        if (!ui) return;
+        clearInterval(timerId);
+        ui.bar.classList.remove('running');
+        ui.bar.classList.add('fail');
+        ui.steps.forEach(li => li.classList.remove('active'));
+
+        ui.foot.innerHTML =
+            '<span class="srx-spacer"></span>' +
+            '<button type="button" class="srx-btn srx-btn-ghost" id="srx-close">Tutup</button>' +
+            '<button type="button" class="srx-btn srx-btn-primary" id="srx-retry">Coba Lagi</button>';
+        ui.foot.querySelector('#srx-close').addEventListener('click', hideLogger);
+        ui.foot.querySelector('#srx-retry').addEventListener('click', () => { hideLogger(); openPanel(); });
+        ui.overlay.dataset.closable = '1';
     }
 
     function hideLogger() {
-        if (logModal) {
-            logModal.style.display = 'none';
-            document.getElementById('export-backdrop').style.display = 'none';
-        }
+        clearInterval(timerId);
+        closeOverlay();
+        ui = null;
     }
 
     // Helper Functions
@@ -274,23 +646,16 @@
         log('Memulai proses ekspor sanding RKA & RUP...', 5);
         
         try {
-            // Detect active Satker ID from page dropdown or URL
-            let activeSatkerId = '';
-            const satkerSelect = document.querySelector('#idSatker') || document.querySelector('select[name="idSatker"]') || document.querySelector('#satker') || document.querySelector('#id_satker');
-            if (satkerSelect) {
-                activeSatkerId = satkerSelect.value;
-            }
-            const urlParams = new URLSearchParams(window.location.search);
-            if (!activeSatkerId) {
-                activeSatkerId = urlParams.get('idSatker') || urlParams.get('satker') || urlParams.get('id_satker') || '';
-            }
-            
+            // Satker & tahun anggaran sudah dikonfirmasi lewat panel pra-ekspor
+            const activeSatkerId = ctx.satkerId;
+
+            log(`Tahun anggaran: ${ctx.tahun}`, 6);
             if (activeSatkerId) {
-                log(`Mendeteksi Satker Aktif ID: ${activeSatkerId}`, 8);
+                log(`Satker aktif: ${ctx.satkerName || '(nama tidak terdeteksi)'} [ID ${activeSatkerId}]`, 8);
             } else {
-                log(`Menggunakan Satker bawaan (Default)...`, 8);
+                log('Menggunakan Satker bawaan sesi login (ID tidak terdeteksi di halaman).', 8, 'warn');
             }
-            
+
             // 1. Crawl RKA
             log('Mengambil daftar Program RKA dari server...', 10);
             
@@ -321,6 +686,7 @@
             let currentStep = 0;
             
             for (const prog of programs) {
+                throwIfAborted();
                 currentStep++;
                 log(`[RKA] Memproses Program: ${prog.text}...`, 10 + (currentStep / totalSteps * 30));
                 
@@ -375,29 +741,23 @@
             if (activeSatkerId) {
                 rupBody += `&idSatker=${activeSatkerId}&satker=${activeSatkerId}&id_satker=${activeSatkerId}`;
             }
-            const rupRes = await postForm('/sirup/datatablectr/dataruppenyedia2018?tahun=2026', rupBody);
+            const rupRes = await postForm(`/sirup/datatablectr/dataruppenyedia2018?tahun=${ctx.tahun}`, rupBody);
             const rupRows = rupRes.aaData || [];
-            
-            // Diagnostic fetch for Swakelola
+
+            // Paket swakelola belum ikut disandingkan — hitung saja sebagai catatan
             try {
-                const swaRes = await postForm('/sirup/datatablectr/datarupswakelola2018?tahun=2026', rupBody);
+                const swaRes = await postForm(`/sirup/datatablectr/datarupswakelola2018?tahun=${ctx.tahun}`, rupBody);
                 const swaRows = swaRes.aaData || [];
                 if (swaRows.length > 0) {
-                    console.log("Swakelola Row 0:", swaRows[0]);
-                    log(`[Swakelola Diagnostic] Ditemukan ${swaRows.length} paket. Row 0: ` + JSON.stringify(swaRows[0]).substring(0, 150), 57);
-                } else {
-                    log("[Swakelola Diagnostic] Tidak ada paket swakelola ditemukan.", 57);
+                    log(`Catatan: ada ${swaRows.length} paket swakelola di RUP. Laporan ini hanya menyanding paket penyedia.`, 57, 'warn');
                 }
             } catch (swaErr) {
                 console.error("Swakelola fetch error:", swaErr);
-                log("[Swakelola Diagnostic] Gagal mengambil: " + swaErr.message, 57);
+                log('Catatan: daftar paket swakelola tidak bisa diambil (diabaikan).', 57, 'warn');
             }
-            
+
             const rupPackets = [];
             for (const row of rupRows) {
-                if (row[0] == "63181122" || row[0] == 63181122) {
-                    log(`[DEBUG 63181122] A=${row[6]} FD=${row[7]} U=${row[8]} raw=${JSON.stringify(row)}`, 58);
-                }
                 rupPackets.push({
                     id: row[0],
                     keg_name: row[1],
@@ -418,6 +778,7 @@
             let fetchedCount = 0;
             
             await mapConcurrent(rupPackets, 10, async (p) => {
+                throwIfAborted();
                 const detailHtml = await getText(`/sirup/penyedia/${p.id}`);
                 const parser = new DOMParser();
                 const detailDoc = parser.parseFromString(detailHtml, 'text/html');
@@ -458,6 +819,10 @@
                 }
             });
             
+            // mapConcurrent menelan error per item, jadi status batal diperiksa lagi
+            // di sini supaya laporan setengah jadi tidak ikut dibangun.
+            throwIfAborted();
+
             log('Pemuatan data RKA & RUP selesai! Memproses penyandingan...', 85);
             
             // 3. Process data & Match
@@ -495,45 +860,142 @@
             log('Membangun file Excel...', 90);
 
             // 4. Generate Excel using ExcelJS
-            await buildExcel(rkaData, rupPackets, rup_all_lines);
-            
-            log('Excel berhasil di-generate dan diunduh!', 100);
-            setTimeout(hideLogger, 2000);
-            
+            const summary = await buildExcel(rkaData, rupPackets, rup_all_lines);
+
+            log(`Berhasil! File "${summary.fileName}" sudah diunduh.`, 100, 'success');
+            finishSuccess([
+                { label: 'Paket RUP', value: summary.packets.toLocaleString('id-ID') },
+                { label: 'Capaian Umumkan', value: (summary.pct * 100).toFixed(1) + '%' },
+                { label: 'Tanpa Sandingan', value: summary.unmatched.toLocaleString('id-ID') }
+            ]);
+
         } catch (e) {
-            log('ERROR: ' + e.message, null);
             console.error(e);
-            const closeBtn = document.createElement('button');
-            closeBtn.className = 'btn btn-danger';
-            closeBtn.innerText = 'Tutup';
-            closeBtn.style.marginTop = '10px';
-            closeBtn.addEventListener('click', hideLogger);
-            logContent.appendChild(closeBtn);
+            log('ERROR: ' + e.message, null, 'error');
+            finishError(e);
         }
     }
 
     // EXCEL BUILDER FUNCTION (ExcelJS)
     async function buildExcel(rkaData, rupPackets, rup_all_lines) {
         const wb = new ExcelJS.Workbook();
-        
-        // Colors
-        const DARK_BLUE = "1F497D";
-        const LIGHT_BLUE_LVL0 = "B8CCE4";
-        const LIGHT_BLUE_LVL1 = "DCE6F1";
-        const LIGHT_GRAY_LVL2 = "F2F2F2";
-        const LIGHT_GRAY_LVL3 = "F9F9F9";
-        const LIGHT_GREEN = "E2EFDA";
-        const LIGHT_RED = "FCE4D6";
-        const WHITE_COLOR = "FFFFFF";
-        const LIGHT_ORANGE = "FFF2CC";
-        
+
+        wb.creator = 'SiRUP Sanding RKA & RUP v' + APP_VERSION;
+        wb.lastModifiedBy = wb.creator;
+        wb.created = new Date();
+        wb.modified = new Date();
+        wb.title = `Sanding RKA & RUP TA ${ctx.tahun}`;
+        wb.company = ctx.satkerName || '';
+
+        // Palet warna. Semua nilai WAJIB 8 digit ARGB (FF + RRGGBB) — nilai
+        // 6 digit ditulis apa adanya ke XML dan dibaca salah oleh Excel.
+        const DARK_BLUE = "FF1F497D";        // header utama
+        const MID_BLUE = "FF2E6DA4";         // aksen
+        const LIGHT_BLUE_LVL0 = "FFB8CCE4";  // subtotal program
+        const LIGHT_BLUE_LVL1 = "FFDCE6F1";  // subtotal kegiatan
+        const LIGHT_GRAY_LVL2 = "FFF2F2F2";  // subtotal KRO
+        const LIGHT_GRAY_LVL3 = "FFF9F9F9";  // subtotal RO
+        const LIGHT_GREEN = "FFE2EFDA";
+        const LIGHT_RED = "FFFCE4D6";
+        const WHITE_COLOR = "FFFFFFFF";
+        const LIGHT_ORANGE = "FFFFF2CC";
+        const ZEBRA = "FFF7F9FC";            // baris selang-seling
+        const INK = "FF0F172A";
+        const INK_SOFT = "FF595959";
+
+        const FONT = "Segoe UI";
+        const FMT_RP = '#,##0;[Red]-#,##0;"-"';          // dalam tabel (header sudah menyebut Rp)
+        const FMT_RP_FULL = '"Rp"\\ #,##0;[Red]-"Rp"\\ #,##0';  // untuk kartu KPI
+        const FMT_PCT = '0.0%';
+
         // Borders template
         const border_thin = {
-            top: { style: 'thin', color: { argb: 'FFD3D3D3' } },
-            left: { style: 'thin', color: { argb: 'FFD3D3D3' } },
-            bottom: { style: 'thin', color: { argb: 'FFD3D3D3' } },
-            right: { style: 'thin', color: { argb: 'FFD3D3D3' } }
+            top: { style: 'thin', color: { argb: 'FFD9DEE6' } },
+            left: { style: 'thin', color: { argb: 'FFD9DEE6' } },
+            bottom: { style: 'thin', color: { argb: 'FFD9DEE6' } },
+            right: { style: 'thin', color: { argb: 'FFD9DEE6' } }
         };
+
+        const solid = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
+        const rp = (n) => 'Rp ' + (Number(n) || 0).toLocaleString('id-ID');
+        const stamp = new Date().toLocaleString('id-ID', { dateStyle: 'long', timeStyle: 'short' });
+
+        // Kop seragam untuk semua sheet: judul + baris konteks satker/tahun.
+        function writeTitle(ws, title, lastCol, subtitle) {
+            const span = `A1:${lastCol}1`;
+            ws.mergeCells(span);
+            const c = ws.getCell('A1');
+            c.value = title;
+            c.font = { name: FONT, size: 15, bold: true, color: { argb: WHITE_COLOR } };
+            c.fill = solid(DARK_BLUE);
+            c.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+            ws.getRow(1).height = 30;
+
+            ws.mergeCells(`A2:${lastCol}2`);
+            const s = ws.getCell('A2');
+            s.value = subtitle || `${ctx.satkerName || 'Satker'}  •  Tahun Anggaran ${ctx.tahun}  •  Diekspor ${stamp}`;
+            s.font = { name: FONT, size: 9, italic: true, color: { argb: INK_SOFT } };
+            s.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+            ws.getRow(2).height = 16;
+        }
+
+        function writeHeader(ws, rowNum, headers, widths) {
+            const row = ws.getRow(rowNum);
+            row.height = 32;
+            for (let c = 1; c <= headers.length; c++) {
+                const cell = ws.getCell(rowNum, c);
+                cell.value = headers[c - 1];
+                cell.font = { name: FONT, size: 9.5, bold: true, color: { argb: WHITE_COLOR } };
+                cell.fill = solid(DARK_BLUE);
+                cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+                cell.border = border_thin;
+            }
+            if (widths) widths.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+        }
+
+        // Freeze pane + autofilter + setelan cetak, dipanggil setelah sheet penuh.
+        function finishSheet(ws, opts) {
+            const o = opts || {};
+            ws.views = [{
+                state: 'frozen',
+                xSplit: o.freezeCols || 0,
+                ySplit: o.headerRow || 0,
+                showGridLines: false,
+                activeCell: 'A' + ((o.headerRow || 0) + 1)
+            }];
+            if (o.headerRow && o.lastCol && o.lastRow && o.lastRow > o.headerRow) {
+                ws.autoFilter = {
+                    from: { row: o.headerRow, column: o.filterFromCol || 1 },
+                    to: { row: o.lastRow, column: o.lastCol }
+                };
+            }
+            if (o.tabColor) ws.properties.tabColor = { argb: o.tabColor };
+
+            ws.pageSetup = {
+                orientation: o.orientation || 'landscape',
+                paperSize: 9,                       // A4
+                fitToPage: true,
+                fitToWidth: 1,
+                fitToHeight: 0,
+                horizontalCentered: true,
+                margins: { left: 0.3, right: 0.3, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 },
+                printTitlesRow: o.headerRow ? `${o.headerRow}:${o.headerRow}` : undefined
+            };
+            ws.headerFooter = {
+                oddFooter: '&L&9' + (ctx.satkerName || '') + ' — TA ' + ctx.tahun + '&R&9Hal &P dari &N'
+            };
+        }
+
+        // Selang-seling baris data supaya tabel panjang tetap terbaca.
+        function zebra(ws, fromRow, toRow, lastCol) {
+            for (let r = fromRow; r <= toRow; r++) {
+                if ((r - fromRow) % 2 === 0) continue;
+                for (let c = 1; c <= lastCol; c++) {
+                    const cell = ws.getCell(r, c);
+                    if (!cell.fill || cell.fill.type !== 'pattern') cell.fill = solid(ZEBRA);
+                }
+            }
+        }
 
         // --- 0. PRE-CALCULATE ALL TOTALS & STATS ---
         let total_satker_pagu = 0;
@@ -581,7 +1043,9 @@
         }
         total_target_pengadaan = total_satker_pagu - total_non_pengadaan;
         
-        // Sum RUP totals (Only fully announced ones)
+        // Sum RUP totals (Only fully announced ones) + kumpulkan statistik per
+        // komponen untuk tabel "selisih terbesar" di Dashboard.
+        const comp_stats = [];
         for (const prog of rkaData) {
             const prog_code = prog.text.split("]")[0].replace("[", "").trim();
             for (const keg of prog.kegiatans || []) {
@@ -591,12 +1055,45 @@
                         for (const komp of ro.komponens || []) {
                             const comp_key = `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}`;
                             const comp_rup = rup_all_lines.filter(l => l.comp_key === comp_key && l.is_terumumkan);
-                            total_rup_pagu += comp_rup.reduce((sum, l) => sum + l.pagu, 0);
+                            const rup_sum = comp_rup.reduce((sum, l) => sum + l.pagu, 0);
+                            total_rup_pagu += rup_sum;
+
+                            let komp_np = false, komp_gj = false;
+                            let subkomp_np = false, subkomp_gj = false;
+                            let akun_np = false, akun_gj = false;
+                            let np_gaji_sum = 0;
+
+                            for (const r of komp.rows || []) {
+                                if (r.level === 0) {
+                                    komp_np = r.np_ch; komp_gj = r.gj_ch;
+                                } else if (r.level === 1) {
+                                    subkomp_np = r.np_ch; subkomp_gj = r.gj_ch;
+                                } else if (r.level === 2) {
+                                    akun_np = r.np_ch; akun_gj = r.gj_ch;
+                                } else if (r.level === 3) {
+                                    const is_np = r.np_ch || akun_np || subkomp_np || komp_np;
+                                    const is_gj = r.gj_ch || akun_gj || subkomp_gj || komp_gj;
+                                    if (is_np || is_gj) np_gaji_sum += (typeof r.pagu === 'number' ? r.pagu : 0);
+                                }
+                            }
+
+                            const target = (komp.pagu || 0) - np_gaji_sum;
+                            comp_stats.push({
+                                prog_code,
+                                keg_name: keg.name,
+                                ro_name: ro.name,
+                                komp_name: komp.name,
+                                comp_key,
+                                target,
+                                rup: rup_sum,
+                                gap: target - rup_sum
+                            });
                         }
                     }
                 }
             }
         }
+        const top_gaps = comp_stats.filter(c => c.gap > 0).sort((a, b) => b.gap - a.gap).slice(0, 10);
 
         // Gather all RKA detailed Akun keys (7-parts)
         const rka_detailed_keys = new Set();
@@ -671,172 +1168,233 @@
         const unique_unmatched_count = unique_unmatched.length;
 
         // ----------------- SHEET 0: DASHBOARD EVALUASI -----------------
+        // Grid dashboard: 8 kolom (A..H) dibagi jadi 4 slot kartu @2 kolom,
+        // supaya kartu KPI, tabel statistik, dan tabel selisih tetap sejajar.
         const ws_dash = wb.addWorksheet("Dashboard Evaluasi");
-        ws_dash.views = [{ showGridLines: true }];
-        
-        // Title
-        ws_dash.getCell('A1').value = "DASHBOARD MONITORING & EVALUASI INTEGRASI RKA-RUP";
-        ws_dash.getCell('A1').font = { name: "Segoe UI", size: 16, bold: true, color: { argb: 'FF1F497D' } };
-        ws_dash.mergeCells("A1:G1");
-        
-        ws_dash.getCell('A2').value = `Tanggal Ekspor: ${new Date().toLocaleDateString('id-ID')} | Satker: Sekretariat Badan Penyuluhan dan Pengembangan SDM Kelautan dan Perikanan`;
-        ws_dash.getCell('A2').font = { name: "Segoe UI", size: 10, italic: true, color: { argb: 'FF595959' } };
-        ws_dash.mergeCells("A2:G2");
-        
-        // Card 1: TOTAL PAGU SATKER (A4:B6)
-        ws_dash.mergeCells("A4:B4");
-        ws_dash.getCell('A4').value = "TOTAL PAGU SATKER (A)";
-        ws_dash.getCell('A4').font = { name: "Segoe UI", size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
-        ws_dash.getCell('A4').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F497D' } };
-        ws_dash.getCell('A4').alignment = { horizontal: 'center', vertical: 'middle' };
-        
-        ws_dash.mergeCells("A5:B6");
-        ws_dash.getCell('A5').value = total_satker_pagu;
-        ws_dash.getCell('A5').font = { name: "Segoe UI", size: 14, bold: true, color: { argb: 'FF1F497D' } };
-        ws_dash.getCell('A5').numFormat = 'Rp #,##0';
-        ws_dash.getCell('A5').alignment = { horizontal: 'center', vertical: 'middle' };
-        ws_dash.getCell('A5').border = border_thin;
-        
-        // Card 2: TARGET PENGADAAN (C4:D6)
-        ws_dash.mergeCells("C4:D4");
-        ws_dash.getCell('C4').value = "TARGET PENGADAAN (C = A - B)";
-        ws_dash.getCell('C4').font = { name: "Segoe UI", size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
-        ws_dash.getCell('C4').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF203764' } };
-        ws_dash.getCell('C4').alignment = { horizontal: 'center', vertical: 'middle' };
-        
-        ws_dash.mergeCells("C5:D6");
-        ws_dash.getCell('C5').value = total_target_pengadaan;
-        ws_dash.getCell('C5').font = { name: "Segoe UI", size: 14, bold: true, color: { argb: 'FF203764' } };
-        ws_dash.getCell('C5').numFormat = 'Rp #,##0';
-        ws_dash.getCell('C5').alignment = { horizontal: 'center', vertical: 'middle' };
-        ws_dash.getCell('C5').border = border_thin;
+        [22, 16, 22, 16, 22, 16, 22, 16].forEach((w, i) => { ws_dash.getColumn(i + 1).width = w; });
 
-        // Card 3: RUP TERUMUMKAN (E4:F6)
-        ws_dash.mergeCells("E4:F4");
-        ws_dash.getCell('E4').value = "RUP TERUMUMKAN (D)";
-        ws_dash.getCell('E4').font = { name: "Segoe UI", size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
-        ws_dash.getCell('E4').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF375623' } };
-        ws_dash.getCell('E4').alignment = { horizontal: 'center', vertical: 'middle' };
-        
-        ws_dash.mergeCells("E5:F6");
-        ws_dash.getCell('E5').value = total_rup_pagu;
-        ws_dash.getCell('E5').font = { name: "Segoe UI", size: 14, bold: true, color: { argb: 'FF375623' } };
-        ws_dash.getCell('E5').numFormat = 'Rp #,##0';
-        ws_dash.getCell('E5').alignment = { horizontal: 'center', vertical: 'middle' };
-        ws_dash.getCell('E5').border = border_thin;
+        writeTitle(ws_dash, "DASHBOARD MONITORING & EVALUASI INTEGRASI RKA–RUP", "H");
 
-        // Card 4: PERSENTASE CAPAIAN (G4:H6)
-        ws_dash.mergeCells("G4:H4");
-        ws_dash.getCell('G4').value = "PERSENTASE CAPAIAN (%)";
-        ws_dash.getCell('G4').font = { name: "Segoe UI", size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
-        ws_dash.getCell('G4').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7030A0' } };
-        ws_dash.getCell('G4').alignment = { horizontal: 'center', vertical: 'middle' };
-        
         tot_pct = total_target_pengadaan > 0 ? (total_rup_pagu / total_target_pengadaan) : 0;
-        ws_dash.mergeCells("G5:H6");
-        ws_dash.getCell('G5').value = tot_pct;
-        ws_dash.getCell('G5').font = { name: "Segoe UI", size: 16, bold: true, color: { argb: tot_pct === 1 ? 'FF2E7D32' : 'FFC00000' } };
-        ws_dash.getCell('G5').numFormat = '0.0%';
-        ws_dash.getCell('G5').alignment = { horizontal: 'center', vertical: 'middle' };
-        ws_dash.getCell('G5').border = border_thin;
 
-        // Section Title: Ringkasan Statistik
-        ws_dash.getCell('A8').value = "STATISTIK EVALUASI PAKET RKA-RUP";
-        ws_dash.getCell('A8').font = { name: "Segoe UI", size: 12, bold: true, color: { argb: 'FF1F497D' } };
-        
-        // Table Headers (A10:D10)
-        const stat_headers = ["No", "Indikator Evaluasi Anggaran & RUP", "Nilai / Jumlah", "Satuan"];
-        for (let col = 1; col <= 4; col++) {
-            const cell = ws_dash.getCell(10, col);
-            cell.value = stat_headers[col-1];
-            cell.font = { name: "Segoe UI", size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DARK_BLUE } };
-            cell.alignment = { horizontal: 'center', vertical: 'middle' };
-            cell.border = border_thin;
-        }
-
-        // Stats Rows
-        const stats_data = [
-            ["1", "Total Belanja Non-Pengadaan (NP / Gaji Satker) (B)", total_non_pengadaan, "Rupiah (Rp)"],
-            ["2", "Jumlah Paket RUP Terdaftar (Penyedia)", rupPackets.length, "Paket"],
-            ["3", "Jumlah Paket RUP Sah (Terumumkan KPA)", rupPackets.filter(p => p.aktif && p.fd && p.umumkan).length, "Paket"],
-            ["4", "Jumlah Paket RUP Belum Terumumkan (Draft / Dibatalkan)", rupPackets.filter(p => !(p.aktif && p.fd && p.umumkan)).length, "Paket"],
-            ["5", "Jumlah Paket RUP Kehilangan Sandingan (Potensi Salah Input MAK)", unique_unmatched_count, "Paket"]
+        // --- Kartu KPI (baris 4-6) ---
+        const pct_color = tot_pct >= 0.999 ? 'FF15803D' : (tot_pct >= 0.75 ? 'FFB45309' : 'FFB91C1C');
+        const cards = [
+            { col: 1, label: "TOTAL PAGU SATKER (A)", value: total_satker_pagu, fmt: FMT_RP_FULL, head: DARK_BLUE, ink: DARK_BLUE },
+            { col: 3, label: "NON-PENGADAAN (B)", value: total_non_pengadaan, fmt: FMT_RP_FULL, head: "FF7F7F7F", ink: "FF595959" },
+            { col: 5, label: "TARGET PENGADAAN (C = A − B)", value: total_target_pengadaan, fmt: FMT_RP_FULL, head: "FF203764", ink: "FF203764" },
+            { col: 7, label: "RUP TERUMUMKAN (D)", value: total_rup_pagu, fmt: FMT_RP_FULL, head: "FF375623", ink: "FF375623" }
         ];
 
-        for (let i = 0; i < stats_data.length; i++) {
-            const r_idx = 11 + i;
-            const row = stats_data[i];
-            
-            ws_dash.getCell(r_idx, 1).value = row[0];
-            ws_dash.getCell(r_idx, 1).alignment = { horizontal: 'center' };
-            
-            ws_dash.getCell(r_idx, 2).value = row[1];
-            ws_dash.getCell(r_idx, 2).alignment = { horizontal: 'left' };
-            
-            const val_cell = ws_dash.getCell(r_idx, 3);
-            val_cell.value = row[2];
-            if (row[3] === "Rupiah (Rp)") {
-                val_cell.numFormat = '#,##0';
-                val_cell.alignment = { horizontal: 'right' };
-            } else {
-                val_cell.numFormat = '#,##0';
-                val_cell.alignment = { horizontal: 'center' };
-            }
-            
-            ws_dash.getCell(r_idx, 4).value = row[3] === "Rupiah (Rp)" ? "Rupiah (Rp)" : "Paket";
-            ws_dash.getCell(r_idx, 4).alignment = { horizontal: 'center' };
-            
-            for (let c = 1; c <= 4; c++) {
-                const cell = ws_dash.getCell(r_idx, c);
-                cell.font = { name: "Segoe UI", size: 9 };
-                cell.border = border_thin;
-                if (c === 3 && (i === 3 || i === 4) && row[2] > 0) {
-                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF2CC' } };
-                    cell.font = { name: "Segoe UI", size: 9, bold: true, color: { argb: 'FFC00000' } };
-                }
+        for (const card of cards) {
+            const c1 = card.col, c2 = card.col + 1;
+            ws_dash.mergeCells(4, c1, 4, c2);
+            const head = ws_dash.getCell(4, c1);
+            head.value = card.label;
+            head.font = { name: FONT, size: 8.5, bold: true, color: { argb: WHITE_COLOR } };
+            head.fill = solid(card.head);
+            head.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+
+            ws_dash.mergeCells(5, c1, 6, c2);
+            const val = ws_dash.getCell(5, c1);
+            val.value = card.value;
+            val.numFmt = card.fmt;
+            val.font = { name: FONT, size: 14, bold: true, color: { argb: card.ink } };
+            val.alignment = { horizontal: 'center', vertical: 'middle' };
+            val.fill = solid(WHITE_COLOR);
+            for (let r = 4; r <= 6; r++) {
+                for (let c = c1; c <= c2; c++) ws_dash.getCell(r, c).border = border_thin;
             }
         }
-        
-        ws_dash.getColumn(1).width = 5;
-        ws_dash.getColumn(2).width = 50;
-        ws_dash.getColumn(3).width = 25;
-        ws_dash.getColumn(4).width = 15;
-        ws_dash.getColumn(5).width = 18;
-        ws_dash.getColumn(6).width = 18;
-        ws_dash.getColumn(7).width = 18;
-        ws_dash.getColumn(8).width = 18;
+        ws_dash.getRow(4).height = 26;
+        ws_dash.getRow(6).height = 20;
+
+        // --- Baris capaian (baris 8) ---
+        ws_dash.mergeCells("A8:E8");
+        const cap_label = ws_dash.getCell('A8');
+        cap_label.value = "CAPAIAN PENGUMUMAN RUP TERHADAP TARGET PENGADAAN (D ÷ C)";
+        cap_label.font = { name: FONT, size: 10, bold: true, color: { argb: WHITE_COLOR } };
+        cap_label.fill = solid(MID_BLUE);
+        cap_label.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+
+        ws_dash.mergeCells("F8:H8");
+        const cap_val = ws_dash.getCell('F8');
+        cap_val.value = tot_pct;
+        cap_val.numFmt = FMT_PCT;
+        cap_val.font = { name: FONT, size: 14, bold: true, color: { argb: pct_color } };
+        cap_val.fill = solid(tot_pct >= 0.999 ? LIGHT_GREEN : LIGHT_ORANGE);
+        cap_val.alignment = { horizontal: 'center', vertical: 'middle' };
+        for (let c = 1; c <= 8; c++) ws_dash.getCell(8, c).border = border_thin;
+        ws_dash.getRow(8).height = 26;
+
+        // --- Tabel statistik (header baris 10) ---
+        ws_dash.getCell('A10').value = "STATISTIK EVALUASI PAKET RKA–RUP";
+        ws_dash.getCell('A10').font = { name: FONT, size: 11, bold: true, color: { argb: DARK_BLUE } };
+
+        const stat_head_row = 11;
+        [['A', 'C', "Indikator Evaluasi Anggaran & RUP"],
+         ['D', 'E', "Nilai / Jumlah"],
+         ['F', 'H', "Satuan"]].forEach(([a, b, label]) => {
+            ws_dash.mergeCells(`${a}${stat_head_row}:${b}${stat_head_row}`);
+            const cell = ws_dash.getCell(`${a}${stat_head_row}`);
+            cell.value = label;
+            cell.font = { name: FONT, size: 9.5, bold: true, color: { argb: WHITE_COLOR } };
+            cell.fill = solid(DARK_BLUE);
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        });
+        for (let c = 1; c <= 8; c++) ws_dash.getCell(stat_head_row, c).border = border_thin;
+        ws_dash.getRow(stat_head_row).height = 22;
+
+        const pkt_sah = rupPackets.filter(p => p.aktif && p.fd && p.umumkan).length;
+        const pkt_draft = rupPackets.length - pkt_sah;
+        const stats_data = [
+            ["Total belanja non-pengadaan (NP / Gaji satker) — komponen B", total_non_pengadaan, "Rupiah", false],
+            ["Selisih pengadaan yang belum diumumkan (C − D)", total_target_pengadaan - total_rup_pagu, "Rupiah", (total_target_pengadaan - total_rup_pagu) > 0],
+            ["Jumlah paket RUP terdaftar (penyedia)", rupPackets.length, "Paket", false],
+            ["Jumlah paket RUP sah (terumumkan KPA)", pkt_sah, "Paket", false],
+            ["Jumlah paket RUP belum terumumkan (draft / dibatalkan)", pkt_draft, "Paket", pkt_draft > 0],
+            ["Jumlah paket RUP tanpa sandingan RKA (potensi salah input MAK)", unique_unmatched_count, "Paket", unique_unmatched_count > 0]
+        ];
+
+        stats_data.forEach((row, i) => {
+            const r = stat_head_row + 1 + i;
+            ws_dash.mergeCells(`A${r}:C${r}`);
+            ws_dash.mergeCells(`D${r}:E${r}`);
+            ws_dash.mergeCells(`F${r}:H${r}`);
+
+            const label = ws_dash.getCell(`A${r}`);
+            label.value = row[0];
+            label.alignment = { horizontal: 'left', vertical: 'middle', indent: 1, wrapText: true };
+
+            const val = ws_dash.getCell(`D${r}`);
+            val.value = row[1];
+            val.numFmt = row[2] === "Rupiah" ? FMT_RP : '#,##0';
+            val.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+
+            const unit = ws_dash.getCell(`F${r}`);
+            unit.value = row[2];
+            unit.alignment = { horizontal: 'center', vertical: 'middle' };
+
+            for (let c = 1; c <= 8; c++) {
+                const cell = ws_dash.getCell(r, c);
+                cell.border = border_thin;
+                cell.font = { name: FONT, size: 9.5, color: { argb: INK } };
+                if (i % 2 === 1) cell.fill = solid(ZEBRA);
+            }
+            if (row[3]) {
+                val.font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FFC00000' } };
+                val.fill = solid(LIGHT_ORANGE);
+            }
+            ws_dash.getRow(r).height = 18;
+        });
+
+        // --- Tabel 10 selisih terbesar ---
+        let dash_row = stat_head_row + stats_data.length + 3;
+        ws_dash.getCell(`A${dash_row}`).value = "10 KOMPONEN DENGAN SELISIH PENGADAAN TERBESAR";
+        ws_dash.getCell(`A${dash_row}`).font = { name: FONT, size: 11, bold: true, color: { argb: DARK_BLUE } };
+        dash_row++;
+
+        const gap_head_row = dash_row;
+        [['A', 'C', "Komponen"],
+         ['D', 'E', "Target Pengadaan"],
+         ['F', 'G', "RUP Terumumkan"],
+         ['H', 'H', "Selisih"]].forEach(([a, b, label]) => {
+            if (a !== b) ws_dash.mergeCells(`${a}${gap_head_row}:${b}${gap_head_row}`);
+            const cell = ws_dash.getCell(`${a}${gap_head_row}`);
+            cell.value = label;
+            cell.font = { name: FONT, size: 9.5, bold: true, color: { argb: WHITE_COLOR } };
+            cell.fill = solid(DARK_BLUE);
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        });
+        for (let c = 1; c <= 8; c++) ws_dash.getCell(gap_head_row, c).border = border_thin;
+        ws_dash.getRow(gap_head_row).height = 20;
+
+        dash_row = gap_head_row + 1;
+        if (top_gaps.length === 0) {
+            ws_dash.mergeCells(`A${dash_row}:H${dash_row}`);
+            const cell = ws_dash.getCell(`A${dash_row}`);
+            cell.value = "Tidak ada selisih — seluruh target pengadaan sudah terumumkan di RUP.";
+            cell.font = { name: FONT, size: 9.5, italic: true, color: { argb: 'FF166534' } };
+            cell.fill = solid(LIGHT_GREEN);
+            cell.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+            for (let c = 1; c <= 8; c++) ws_dash.getCell(dash_row, c).border = border_thin;
+            dash_row++;
+        } else {
+            top_gaps.forEach((g, i) => {
+                const r = dash_row + i;
+                ws_dash.mergeCells(`A${r}:C${r}`);
+                ws_dash.mergeCells(`D${r}:E${r}`);
+                ws_dash.mergeCells(`F${r}:G${r}`);
+
+                const name = ws_dash.getCell(`A${r}`);
+                name.value = `[${g.prog_code}] ${g.komp_name}`;
+                name.alignment = { horizontal: 'left', vertical: 'middle', indent: 1, wrapText: true };
+                name.note = `Kegiatan: ${g.keg_name}\nRO: ${g.ro_name}\nMAK: ${g.comp_key}`;
+
+                ws_dash.getCell(`D${r}`).value = g.target;
+                ws_dash.getCell(`D${r}`).numFmt = FMT_RP;
+                ws_dash.getCell(`F${r}`).value = g.rup;
+                ws_dash.getCell(`F${r}`).numFmt = FMT_RP;
+                ws_dash.getCell(`H${r}`).value = g.gap;
+                ws_dash.getCell(`H${r}`).numFmt = FMT_RP;
+
+                for (let c = 1; c <= 8; c++) {
+                    const cell = ws_dash.getCell(r, c);
+                    cell.border = border_thin;
+                    cell.font = { name: FONT, size: 9.5, color: { argb: INK } };
+                    if (c >= 4) cell.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+                    if (i % 2 === 1) cell.fill = solid(ZEBRA);
+                }
+                ws_dash.getCell(`H${r}`).font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FFC00000' } };
+                ws_dash.getRow(r).height = 18;
+            });
+            dash_row += top_gaps.length;
+        }
+
+        // --- Legenda warna status ---
+        dash_row += 1;
+        ws_dash.getCell(`A${dash_row}`).value = "KETERANGAN WARNA STATUS (sheet Sanding & Detail)";
+        ws_dash.getCell(`A${dash_row}`).font = { name: FONT, size: 10, bold: true, color: { argb: DARK_BLUE } };
+        dash_row++;
+
+        [[1, LIGHT_GREEN, "Sesuai — RUP sudah menutup target"],
+         [3, LIGHT_BLUE_LVL1, "Parsial — baru sebagian diumumkan"],
+         [5, LIGHT_RED, "Kelebihan / belum diumumkan"],
+         [7, LIGHT_ORANGE, "Paket masih draft atau dibatalkan"]].forEach(([col, color, text]) => {
+            const sw = ws_dash.getCell(dash_row, col);
+            sw.fill = solid(color);
+            sw.border = border_thin;
+            const lbl = ws_dash.getCell(dash_row, col + 1);
+            lbl.value = text;
+            lbl.font = { name: FONT, size: 8.5, color: { argb: INK_SOFT } };
+            lbl.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+        });
+        ws_dash.getRow(dash_row).height = 26;
+
+        finishSheet(ws_dash, { headerRow: 0, tabColor: DARK_BLUE, orientation: 'portrait' });
 
         // ----------------- SHEET 1: RINGKASAN PAGU -----------------
         const ws_summary = wb.addWorksheet("Ringkasan Pagu");
-        ws_summary.views = [{ showGridLines: true }];
-        
-        ws_summary.getCell('A1').value = "RINGKASAN PAGU ANGGARAN SATKER TAHUN 2026";
-        ws_summary.getCell('A1').font = { name: "Segoe UI", size: 16, bold: true, color: { argb: 'FF1F497D' } };
-        ws_summary.mergeCells("A1:L1");
 
-        ws_summary.getCell('A3').value = "TOTAL PAGU SATKER";
-        ws_summary.getCell('A3').font = { name: "Segoe UI", size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
-        ws_summary.getCell('A3').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DARK_BLUE } };
-        ws_summary.getCell('A3').alignment = { horizontal: 'center', vertical: 'middle' };
-        
+        writeTitle(ws_summary, `RINGKASAN PAGU ANGGARAN SATKER TA ${ctx.tahun}`, "L");
+
+        ws_summary.mergeCells("A4:C4");
+        ws_summary.getCell('A4').value = "TOTAL PAGU SATKER";
+        ws_summary.getCell('A4').font = { name: FONT, size: 10, bold: true, color: { argb: WHITE_COLOR } };
+        ws_summary.getCell('A4').fill = solid(DARK_BLUE);
+        ws_summary.getCell('A4').alignment = { horizontal: 'center', vertical: 'middle' };
+
         total_satker_pagu = 0;
-        
+
         const headers_summary = [
             "No", "Kode Program", "Nama Program", "Kode Kegiatan", "Nama Kegiatan",
             "Kode KRO", "Nama KRO", "Kode RO", "Nama RO", "Kode Komponen", "Nama Komponen", "Pagu Komponen"
         ];
-        
-        for (let c = 1; c <= headers_summary.length; c++) {
-            const cell = ws_summary.getCell(6, c);
-            cell.value = headers_summary[c-1];
-            cell.font = { name: "Segoe UI", size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DARK_BLUE } };
-            cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-            cell.border = border_thin;
-        }
 
-        let row_idx = 7;
+        writeHeader(ws_summary, 7, headers_summary,
+            [6, 13, 28, 13, 28, 13, 28, 13, 28, 13, 34, 18]);
+
+        let row_idx = 8;
         let num = 1;
         
         for (const prog of rkaData) {
@@ -861,12 +1419,12 @@
                             ws_summary.getCell(row_idx, 10).value = komp.code;
                             ws_summary.getCell(row_idx, 11).value = komp.name;
                             ws_summary.getCell(row_idx, 12).value = komp.pagu;
-                            ws_summary.getCell(row_idx, 12).numFormat = '#,##0';
-                            
+                            ws_summary.getCell(row_idx, 12).numFmt = FMT_RP;
+
                             for (let col_c = 1; col_c <= 12; col_c++) {
                                 const cell = ws_summary.getCell(row_idx, col_c);
                                 cell.border = border_thin;
-                                cell.font = { name: "Segoe UI", size: 9 };
+                                cell.font = { name: FONT, size: 9, color: { argb: INK } };
                                 if (col_c === 1 || col_c === 2 || col_c === 4 || col_c === 6 || col_c === 8 || col_c === 10) {
                                     cell.alignment = { horizontal: 'center', vertical: 'middle' };
                                 } else if (col_c === 12) {
@@ -885,61 +1443,50 @@
             }
         }
 
-        ws_summary.getCell(row_idx, 11).value = "TOTAL";
-        ws_summary.getCell(row_idx, 11).font = { name: "Segoe UI", size: 10, bold: true };
+        zebra(ws_summary, 8, row_idx - 1, 12);
+
+        // Baris TOTAL
+        for (let c = 1; c <= 12; c++) {
+            const cell = ws_summary.getCell(row_idx, c);
+            cell.fill = solid(LIGHT_BLUE_LVL0);
+            cell.border = border_thin;
+            cell.font = { name: FONT, size: 10, bold: true, color: { argb: DARK_BLUE } };
+        }
+        ws_summary.getCell(row_idx, 11).value = "TOTAL PAGU SATKER";
         ws_summary.getCell(row_idx, 11).alignment = { horizontal: 'right', vertical: 'middle' };
-        ws_summary.getCell(row_idx, 11).border = border_thin;
-
         ws_summary.getCell(row_idx, 12).value = total_satker_pagu;
-        ws_summary.getCell(row_idx, 12).font = { name: "Segoe UI", size: 10, bold: true };
-        ws_summary.getCell(row_idx, 12).numFormat = '#,##0';
+        ws_summary.getCell(row_idx, 12).numFmt = FMT_RP;
         ws_summary.getCell(row_idx, 12).alignment = { horizontal: 'right', vertical: 'middle' };
-        ws_summary.getCell(row_idx, 12).border = border_thin;
+        ws_summary.getRow(row_idx).height = 20;
 
-        ws_summary.getCell('A4').value = total_satker_pagu;
-        ws_summary.getCell('A4').font = { name: "Segoe UI", size: 18, bold: true, color: { argb: 'FF1F497D' } };
-        ws_summary.getCell('A4').numFormat = 'Rp #,##0';
-        ws_summary.getCell('A4').alignment = { horizontal: 'center', vertical: 'middle' };
-        ws_summary.mergeCells("A3:C3");
-        ws_summary.mergeCells("A4:C4");
+        // Kartu total di kop sheet
+        ws_summary.mergeCells("A5:C6");
+        const sum_kpi = ws_summary.getCell('A5');
+        sum_kpi.value = total_satker_pagu;
+        sum_kpi.font = { name: FONT, size: 18, bold: true, color: { argb: DARK_BLUE } };
+        sum_kpi.numFmt = FMT_RP_FULL;
+        sum_kpi.alignment = { horizontal: 'center', vertical: 'middle' };
+        for (let r = 4; r <= 6; r++) {
+            for (let c = 1; c <= 3; c++) ws_summary.getCell(r, c).border = border_thin;
+        }
 
-        ws_summary.getColumn(1).width = 5;
-        ws_summary.getColumn(2).width = 12;
-        ws_summary.getColumn(3).width = 25;
-        ws_summary.getColumn(4).width = 12;
-        ws_summary.getColumn(5).width = 25;
-        ws_summary.getColumn(6).width = 12;
-        ws_summary.getColumn(7).width = 25;
-        ws_summary.getColumn(8).width = 12;
-        ws_summary.getColumn(9).width = 25;
-        ws_summary.getColumn(10).width = 12;
-        ws_summary.getColumn(11).width = 30;
-        ws_summary.getColumn(12).width = 18;
+        finishSheet(ws_summary, { headerRow: 7, lastRow: row_idx - 1, lastCol: 12, tabColor: MID_BLUE });
 
 
         // ----------------- SHEET 2: SANDING RKA & RUP -----------------
         const ws_sanding = wb.addWorksheet("Sanding RKA & RUP");
-        ws_sanding.views = [{ showGridLines: true }];
-        
-        ws_sanding.getCell('A1').value = "PENYANDINGAN PAGU RKA DENGAN REALISASI RUP (TERUMUMKAN)";
-        ws_sanding.getCell('A1').font = { name: "Segoe UI", size: 16, bold: true, color: { argb: 'FF1F497D' } };
-        ws_sanding.mergeCells("A1:N1");
+
+        writeTitle(ws_sanding, "PENYANDINGAN PAGU RKA DENGAN RUP TERUMUMKAN", "N");
 
         const headers_sanding = [
-            "No", "Program", "Kegiatan", "KRO (Output)", "RO (Sub-Output)", "Komponen", 
-            "Key Otorisasi (MAK)", "Pagu RKA (A)", "Pagu Non-Pengadaan (B)", 
-            "Target Pengadaan (C = A - B)", "Pagu RUP Terumumkan (D)", 
-            "Selisih Pengadaan (C - D)", "Persentase (%)", "Status Evaluasi"
+            "No", "Program", "Kegiatan", "KRO (Output)", "RO (Sub-Output)", "Komponen",
+            "Key Otorisasi (MAK)", "Pagu RKA (A)", "Non-Pengadaan (B)",
+            "Target Pengadaan (C = A − B)", "RUP Terumumkan (D)",
+            "Selisih (C − D)", "Capaian", "Status Evaluasi"
         ];
 
-        for (let c = 1; c <= headers_sanding.length; c++) {
-            const cell = ws_sanding.getCell(4, c);
-            cell.value = headers_sanding[c-1];
-            cell.font = { name: "Segoe UI", size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DARK_BLUE } };
-            cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-            cell.border = border_thin;
-        }
+        writeHeader(ws_sanding, 4, headers_sanding,
+            [6, 10, 26, 26, 26, 28, 24, 16, 16, 18, 18, 18, 11, 24]);
 
         function writeSandingRow(rowNum, numVal, prog_code, keg_name, kro_name, ro_name, comp_name, comp_key,
                                   pagu_rka, np_gaji_sum, target_pengadaan, rup_sum,
@@ -949,34 +1496,43 @@
             let pct = 0;
             let status_text = "";
             let status_fill = WHITE_COLOR;
-            
+            let status_ink = INK;
+
             if (target_pengadaan === 0) {
                 if (rup_sum === 0) {
                     pct = 1.0;
                     status_text = "Sesuai (Non-Pengadaan)";
                     status_fill = LIGHT_GREEN;
+                    status_ink = 'FF166534';
                 } else {
-                    pct = 9.99;
+                    // Tidak ada target tapi ada paket diumumkan: persentase tak
+                    // terdefinisi, jadi sel capaian dikosongkan.
+                    pct = null;
                     status_text = "Kelebihan Umumkan";
                     status_fill = LIGHT_RED;
+                    status_ink = 'FF991B1B';
                 }
             } else {
                 pct = rup_sum / target_pengadaan;
                 if (pct === 1.0) {
                     status_text = "Sesuai (100%)";
                     status_fill = LIGHT_GREEN;
+                    status_ink = 'FF166534';
                 } else if (pct > 0 && pct < 1.0) {
                     status_text = `Parsial (${(pct*100).toFixed(1)}%)`;
                     status_fill = LIGHT_BLUE_LVL1;
+                    status_ink = 'FF1E40AF';
                 } else if (pct > 1.0) {
                     status_text = `Kelebihan (${(pct*100).toFixed(1)}%)`;
                     status_fill = LIGHT_RED;
+                    status_ink = 'FF991B1B';
                 } else {
                     status_text = "Belum Diumumkan";
                     status_fill = LIGHT_RED;
+                    status_ink = 'FF991B1B';
                 }
             }
-            
+
             ws_sanding.getCell(rowNum, 1).value = numVal;
             ws_sanding.getCell(rowNum, 2).value = prog_code;
             ws_sanding.getCell(rowNum, 3).value = keg_name;
@@ -986,42 +1542,52 @@
             ws_sanding.getCell(rowNum, 7).value = comp_key;
             
             ws_sanding.getCell(rowNum, 8).value = pagu_rka;
-            ws_sanding.getCell(rowNum, 8).numFormat = '#,##0';
-            
+            ws_sanding.getCell(rowNum, 8).numFmt = FMT_RP;
+
             ws_sanding.getCell(rowNum, 9).value = np_gaji_sum;
-            ws_sanding.getCell(rowNum, 9).numFormat = '#,##0';
-            
+            ws_sanding.getCell(rowNum, 9).numFmt = FMT_RP;
+
             ws_sanding.getCell(rowNum, 10).value = target_pengadaan;
-            ws_sanding.getCell(rowNum, 10).numFormat = '#,##0';
-            
+            ws_sanding.getCell(rowNum, 10).numFmt = FMT_RP;
+
             ws_sanding.getCell(rowNum, 11).value = rup_sum;
-            ws_sanding.getCell(rowNum, 11).numFormat = '#,##0';
-            
+            ws_sanding.getCell(rowNum, 11).numFmt = FMT_RP;
+
             ws_sanding.getCell(rowNum, 12).value = selisih_pengadaan;
-            ws_sanding.getCell(rowNum, 12).numFormat = '#,##0';
-            
+            ws_sanding.getCell(rowNum, 12).numFmt = FMT_RP;
+
             ws_sanding.getCell(rowNum, 13).value = pct;
-            ws_sanding.getCell(rowNum, 13).numFormat = '0.0%';
-            
-            const status_cell = ws_sanding.getCell(rowNum, 14);
-            status_cell.value = status_text;
-            status_cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: status_fill } };
-            
+            ws_sanding.getCell(rowNum, 13).numFmt = FMT_PCT;
+
             for (let col_c = 1; col_c <= 14; col_c++) {
                 const cell = ws_sanding.getCell(rowNum, col_c);
                 cell.border = border_thin;
                 cell.font = font_style;
-                if (bg_fill) {
-                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bg_fill } };
+                // Kolom 14 memakai warna status, jangan ditimpa warna subtotal.
+                if (bg_fill && col_c !== 14) {
+                    cell.fill = solid(bg_fill);
                 }
-                
+
                 if (col_c === 1 || col_c === 2 || col_c === 7 || col_c === 14) {
                     cell.alignment = { horizontal: 'center', vertical: 'middle' };
                 } else if (col_c >= 8 && col_c <= 13) {
-                    cell.alignment = { horizontal: 'right', vertical: 'middle' };
+                    cell.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
                 } else {
                     cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
                 }
+            }
+
+            // Kolom status: warna & teks sendiri, ditulis terakhir supaya menang.
+            const status_cell = ws_sanding.getCell(rowNum, 14);
+            status_cell.value = status_text;
+            status_cell.fill = solid(status_fill);
+            status_cell.font = { name: FONT, size: 9, bold: true, color: { argb: status_ink } };
+
+            // Selisih yang masih menganga ditandai merah.
+            if (selisih_pengadaan > 0) {
+                ws_sanding.getCell(rowNum, 12).font = {
+                    name: FONT, size: font_style.size || 9, bold: font_style.bold || false, color: { argb: 'FFC00000' }
+                };
             }
         }
 
@@ -1030,9 +1596,9 @@
         total_rup_pagu = 0;
         total_non_pengadaan = 0;
         total_target_pengadaan = 0;
-        
-        const font_sub = { name: "Segoe UI", size: 9, bold: true };
-        const font_det = { name: "Segoe UI", size: 9 };
+
+        const font_sub = { name: FONT, size: 9, bold: true, color: { argb: DARK_BLUE } };
+        const font_det = { name: FONT, size: 9, color: { argb: INK } };
 
         for (const prog of rkaData) {
             const prog_code = prog.text.split("]")[0].replace("[", "").trim();
@@ -1171,169 +1737,136 @@
             row_idx++;
         }
 
-        // Total Row Sanding
-        ws_sanding.getCell(row_idx, 7).value = "TOTAL";
-        ws_sanding.getCell(row_idx, 7).font = { name: "Segoe UI", size: 10, bold: true };
-        ws_sanding.getCell(row_idx, 7).alignment = { horizontal: 'right', vertical: 'middle' };
-        ws_sanding.getCell(row_idx, 7).border = border_thin;
-
-        ws_sanding.getCell(row_idx, 8).value = total_satker_pagu;
-        ws_sanding.getCell(row_idx, 8).font = { name: "Segoe UI", size: 10, bold: true };
-        ws_sanding.getCell(row_idx, 8).numFormat = '#,##0';
-        ws_sanding.getCell(row_idx, 8).border = border_thin;
-
-        ws_sanding.getCell(row_idx, 9).value = total_non_pengadaan;
-        ws_sanding.getCell(row_idx, 9).font = { name: "Segoe UI", size: 10, bold: true };
-        ws_sanding.getCell(row_idx, 9).numFormat = '#,##0';
-        ws_sanding.getCell(row_idx, 9).border = border_thin;
-
-        ws_sanding.getCell(row_idx, 10).value = total_target_pengadaan;
-        ws_sanding.getCell(row_idx, 10).font = { name: "Segoe UI", size: 10, bold: true };
-        ws_sanding.getCell(row_idx, 10).numFormat = '#,##0';
-        ws_sanding.getCell(row_idx, 10).border = border_thin;
-
-        ws_sanding.getCell(row_idx, 11).value = total_rup_pagu;
-        ws_sanding.getCell(row_idx, 11).font = { name: "Segoe UI", size: 10, bold: true };
-        ws_sanding.getCell(row_idx, 11).numFormat = '#,##0';
-        ws_sanding.getCell(row_idx, 11).border = border_thin;
-
-        ws_sanding.getCell(row_idx, 12).value = total_target_pengadaan - total_rup_pagu;
-        ws_sanding.getCell(row_idx, 12).font = { name: "Segoe UI", size: 10, bold: true };
-        ws_sanding.getCell(row_idx, 12).numFormat = '#,##0';
-        ws_sanding.getCell(row_idx, 12).border = border_thin;
-
+        // Baris TOTAL
         tot_pct = total_target_pengadaan > 0 ? (total_rup_pagu / total_target_pengadaan) : 0;
+        const sanding_last_row = row_idx;
+
+        for (let c = 1; c <= 14; c++) {
+            const cell = ws_sanding.getCell(row_idx, c);
+            cell.fill = solid(DARK_BLUE);
+            cell.border = border_thin;
+            cell.font = { name: FONT, size: 10, bold: true, color: { argb: WHITE_COLOR } };
+            cell.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+        }
+        ws_sanding.getCell(row_idx, 7).value = "TOTAL SATKER";
+        ws_sanding.getCell(row_idx, 8).value = total_satker_pagu;
+        ws_sanding.getCell(row_idx, 8).numFmt = FMT_RP;
+        ws_sanding.getCell(row_idx, 9).value = total_non_pengadaan;
+        ws_sanding.getCell(row_idx, 9).numFmt = FMT_RP;
+        ws_sanding.getCell(row_idx, 10).value = total_target_pengadaan;
+        ws_sanding.getCell(row_idx, 10).numFmt = FMT_RP;
+        ws_sanding.getCell(row_idx, 11).value = total_rup_pagu;
+        ws_sanding.getCell(row_idx, 11).numFmt = FMT_RP;
+        ws_sanding.getCell(row_idx, 12).value = total_target_pengadaan - total_rup_pagu;
+        ws_sanding.getCell(row_idx, 12).numFmt = FMT_RP;
         ws_sanding.getCell(row_idx, 13).value = tot_pct;
-        ws_sanding.getCell(row_idx, 13).font = { name: "Segoe UI", size: 10, bold: true };
-        ws_sanding.getCell(row_idx, 13).numFormat = '0.0%';
-        ws_sanding.getCell(row_idx, 13).border = border_thin;
+        ws_sanding.getCell(row_idx, 13).numFmt = FMT_PCT;
+        ws_sanding.getRow(row_idx).height = 22;
 
-        ws_sanding.getCell('A2').value = `Total Pagu RKA: Rp ${total_satker_pagu.toLocaleString('id')} | Target Pengadaan: Rp ${total_target_pengadaan.toLocaleString('id')} | Terumumkan RUP: Rp ${total_rup_pagu.toLocaleString('id')} (${(tot_pct*100).toFixed(1)}%)`;
-        ws_sanding.getCell('A2').font = { name: "Segoe UI", size: 10, italic: true };
-        ws_sanding.mergeCells("A2:N2");
+        ws_sanding.getCell('A3').value =
+            `Pagu RKA ${rp(total_satker_pagu)}  •  Target pengadaan ${rp(total_target_pengadaan)}  •  ` +
+            `RUP terumumkan ${rp(total_rup_pagu)} (${(tot_pct * 100).toFixed(1)}%)  •  ` +
+            `Sisa belum diumumkan ${rp(total_target_pengadaan - total_rup_pagu)}`;
+        ws_sanding.getCell('A3').font = { name: FONT, size: 9.5, bold: true, color: { argb: DARK_BLUE } };
+        ws_sanding.getCell('A3').alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+        ws_sanding.getCell('A3').fill = solid(LIGHT_BLUE_LVL1);
+        ws_sanding.mergeCells("A3:N3");
+        ws_sanding.getRow(3).height = 20;
 
-        ws_sanding.getColumn(1).width = 6;
-        ws_sanding.getColumn(2).width = 10;
-        ws_sanding.getColumn(3).width = 25;
-        ws_sanding.getColumn(4).width = 25;
-        ws_sanding.getColumn(5).width = 25;
-        ws_sanding.getColumn(6).width = 25;
-        ws_sanding.getColumn(7).width = 22;
-        ws_sanding.getColumn(8).width = 15;
-        ws_sanding.getColumn(9).width = 22;
-        ws_sanding.getColumn(10).width = 22;
-        ws_sanding.getColumn(11).width = 22;
-        ws_sanding.getColumn(12).width = 22;
-        ws_sanding.getColumn(13).width = 12;
-        ws_sanding.getColumn(14).width = 25;
+        finishSheet(ws_sanding, {
+            headerRow: 4, lastRow: sanding_last_row - 1, lastCol: 14, tabColor: DARK_BLUE
+        });
 
 
         // ----------------- SHEET 3: DAFTAR PAKET RUP -----------------
         const ws_rup = wb.addWorksheet("Daftar Paket RUP");
-        ws_rup.views = [{ showGridLines: true }];
-        
-        ws_rup.getCell('A1').value = "DAFTAR PAKET PENYEDIA EXISTING YANG TERUMUMKAN (RUP)";
-        ws_rup.getCell('A1').font = { name: "Segoe UI", size: 16, bold: true, color: { argb: 'FF1F497D' } };
-        ws_rup.mergeCells("A1:L1");
+
+        writeTitle(ws_rup, "DAFTAR PAKET PENYEDIA DI RUP", "M");
 
         const headers_rup = [
-            "No", "ID Paket", "Nama Kegiatan (RUP)", "Nama Paket", "Pagu RUP (Rp)",
-            "Waktu Pemilihan", "Sumber Dana", "A (Draft PPK)", "FD (Final Draft PPK)",
-            "U (Terumumkan KPA)", "Kode Otorisasi (MAK)", "Mata Anggaran Mapped"
+            "No", "ID Paket", "Nama Kegiatan (RUP)", "Nama Paket", "Pagu RUP",
+            "Waktu Pemilihan", "Sumber Dana", "A", "FD", "U", "Status Paket",
+            "Kode Otorisasi (MAK)", "Komponen RKA Tersanding"
         ];
 
-        for (let c = 1; c <= headers_rup.length; c++) {
-            const cell = ws_rup.getCell(4, c);
-            cell.value = headers_rup[c-1];
-            cell.font = { name: "Segoe UI", size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DARK_BLUE } };
-            cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-            cell.border = border_thin;
-        }
+        writeHeader(ws_rup, 4, headers_rup,
+            [6, 12, 28, 40, 16, 16, 13, 6, 6, 6, 20, 30, 26]);
+        ws_rup.getCell(4, 8).note = "A = Draft PPK";
+        ws_rup.getCell(4, 9).note = "FD = Final Draft PPK";
+        ws_rup.getCell(4, 10).note = "U = Sudah diumumkan KPA";
 
         row_idx = 5;
         for (let idx = 0; idx < rupPackets.length; idx++) {
             const p = rupPackets[idx];
+            const sah = p.aktif && p.fd && p.umumkan;
+
             ws_rup.getCell(row_idx, 1).value = idx + 1;
             ws_rup.getCell(row_idx, 2).value = p.id;
             ws_rup.getCell(row_idx, 3).value = p.keg_name;
             ws_rup.getCell(row_idx, 4).value = p.name;
-            
+
             ws_rup.getCell(row_idx, 5).value = p.pagu;
-            ws_rup.getCell(row_idx, 5).numFormat = '#,##0';
-            
+            ws_rup.getCell(row_idx, 5).numFmt = FMT_RP;
+
             ws_rup.getCell(row_idx, 6).value = p.waktu;
             ws_rup.getCell(row_idx, 7).value = p.sumber_dana;
-            ws_rup.getCell(row_idx, 8).value = p.aktif ? "✓" : "";
-            ws_rup.getCell(row_idx, 9).value = p.fd ? "✓" : "";
-            ws_rup.getCell(row_idx, 10).value = p.umumkan ? "✓" : "";
-            ws_rup.getCell(row_idx, 11).value = p.mak;
-            
-            const p_comp_keys = Array.from(new Set(rup_all_lines.filter(l => l.packet_id === p.id).map(l => l.comp_key)));
-            ws_rup.getCell(row_idx, 12).value = p_comp_keys.join(", ");
+            ws_rup.getCell(row_idx, 8).value = p.aktif ? "✓" : "–";
+            ws_rup.getCell(row_idx, 9).value = p.fd ? "✓" : "–";
+            ws_rup.getCell(row_idx, 10).value = p.umumkan ? "✓" : "–";
+            ws_rup.getCell(row_idx, 11).value = sah ? "Terumumkan" : "Draft / Batal";
+            ws_rup.getCell(row_idx, 12).value = p.mak;
 
-            for (let col_c = 1; col_c <= 12; col_c++) {
+            const p_comp_keys = Array.from(new Set(rup_all_lines.filter(l => l.packet_id === p.id).map(l => l.comp_key)));
+            ws_rup.getCell(row_idx, 13).value = p_comp_keys.join(", ");
+
+            for (let col_c = 1; col_c <= 13; col_c++) {
                 const cell = ws_rup.getCell(row_idx, col_c);
                 cell.border = border_thin;
-                cell.font = { name: "Segoe UI", size: 9 };
-                if (col_c === 1 || col_c === 2 || col_c === 6 || col_c === 7 || (col_c >= 8 && col_c <= 10) || col_c === 11 || col_c === 12) {
-                    cell.alignment = { horizontal: 'center', vertical: 'middle' };
-                } else if (col_c === 5) {
-                    cell.alignment = { horizontal: 'right', vertical: 'middle' };
-                } else {
+                cell.font = { name: FONT, size: 9, color: { argb: sah ? INK : INK_SOFT } };
+                if (col_c === 5) {
+                    cell.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+                } else if (col_c === 3 || col_c === 4) {
                     cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+                } else {
+                    cell.alignment = { horizontal: 'center', vertical: 'middle' };
                 }
             }
+
+            const st = ws_rup.getCell(row_idx, 11);
+            st.fill = solid(sah ? LIGHT_GREEN : LIGHT_ORANGE);
+            st.font = { name: FONT, size: 9, bold: true, color: { argb: sah ? 'FF166534' : 'FFB45309' } };
+
             row_idx++;
         }
 
-        ws_rup.getCell(row_idx, 4).value = "TOTAL";
-        ws_rup.getCell(row_idx, 4).font = { name: "Segoe UI", size: 10, bold: true };
-        ws_rup.getCell(row_idx, 4).alignment = { horizontal: 'right', vertical: 'middle' };
-        ws_rup.getCell(row_idx, 4).border = border_thin;
+        zebra(ws_rup, 5, row_idx - 1, 13);
 
+        const rup_last_row = row_idx;
+        for (let c = 1; c <= 13; c++) {
+            const cell = ws_rup.getCell(row_idx, c);
+            cell.fill = solid(LIGHT_BLUE_LVL0);
+            cell.border = border_thin;
+            cell.font = { name: FONT, size: 10, bold: true, color: { argb: DARK_BLUE } };
+            cell.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+        }
+        ws_rup.getCell(row_idx, 4).value = "TOTAL PAGU RUP TERUMUMKAN";
         ws_rup.getCell(row_idx, 5).value = total_rup_pagu;
-        ws_rup.getCell(row_idx, 5).font = { name: "Segoe UI", size: 10, bold: true };
-        ws_rup.getCell(row_idx, 5).numFormat = '#,##0';
-        ws_rup.getCell(row_idx, 5).border = border_thin;
+        ws_rup.getCell(row_idx, 5).numFmt = FMT_RP;
+        ws_rup.getRow(row_idx).height = 20;
 
-        ws_rup.getColumn(1).width = 5;
-        ws_rup.getColumn(2).width = 12;
-        ws_rup.getColumn(3).width = 25;
-        ws_rup.getColumn(4).width = 35;
-        ws_rup.getColumn(5).width = 15;
-        ws_rup.getColumn(6).width = 15;
-        ws_rup.getColumn(7).width = 12;
-        ws_rup.getColumn(8).width = 15;
-        ws_rup.getColumn(9).width = 18;
-        ws_rup.getColumn(10).width = 18;
-        ws_rup.getColumn(11).width = 30;
-        ws_rup.getColumn(12).width = 20;
+        finishSheet(ws_rup, { headerRow: 4, lastRow: rup_last_row - 1, lastCol: 13, tabColor: 'FF375623' });
 
 
         // ----------------- SHEET 3A: PAKET RUP TANPA SANDINGAN -----------------
         const ws_no_sanding = wb.addWorksheet("Paket RUP Tanpa Sandingan");
-        ws_no_sanding.views = [{ showGridLines: true }];
-        
-        ws_no_sanding.getCell('A1').value = "DAFTAR PAKET RUP YANG TIDAK MEMILIKI SANDINGAN DI RKA";
-        ws_no_sanding.getCell('A1').font = { name: "Segoe UI", size: 16, bold: true, color: { argb: 'FF1F497D' } };
-        ws_no_sanding.mergeCells("A1:F1");
+
+        writeTitle(ws_no_sanding, "PAKET RUP TANPA SANDINGAN DI RKA", "F");
 
         const headers_no_sanding = [
-            "No", "ID Paket RUP", "Nama Paket RUP", "Kode MAK di RUP", "Pagu Paket (Rp)", "Keterangan / Alasan"
+            "No", "ID Paket RUP", "Nama Paket RUP", "Kode MAK di RUP", "Pagu Paket", "Keterangan / Alasan"
         ];
 
-        for (let c = 1; c <= headers_no_sanding.length; c++) {
-            const cell = ws_no_sanding.getCell(4, c);
-            cell.value = headers_no_sanding[c-1];
-            cell.font = { name: "Segoe UI", size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DARK_BLUE } };
-            cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-            cell.border = border_thin;
-        }
-
-
-
+        writeHeader(ws_no_sanding, 4, headers_no_sanding, [6, 15, 40, 30, 18, 48]);
 
 
         let no_sanding_row = 5;
@@ -1345,20 +1878,20 @@
             ws_no_sanding.getCell(no_sanding_row, 4).value = item.mak;
             
             ws_no_sanding.getCell(no_sanding_row, 5).value = item.pagu;
-            ws_no_sanding.getCell(no_sanding_row, 5).numFormat = '#,##0';
-            
+            ws_no_sanding.getCell(no_sanding_row, 5).numFmt = FMT_RP;
+
             ws_no_sanding.getCell(no_sanding_row, 6).value = item.reason;
 
             for (let col_c = 1; col_c <= 6; col_c++) {
                 const cell = ws_no_sanding.getCell(no_sanding_row, col_c);
                 cell.border = border_thin;
-                cell.font = { name: "Segoe UI", size: 9 };
-                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: LIGHT_RED } };
-                
+                cell.font = { name: FONT, size: 9, color: { argb: INK } };
+                cell.fill = solid(LIGHT_RED);
+
                 if (col_c === 1 || col_c === 2 || col_c === 4) {
                     cell.alignment = { horizontal: 'center', vertical: 'middle' };
                 } else if (col_c === 5) {
-                    cell.alignment = { horizontal: 'right', vertical: 'middle' };
+                    cell.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
                 } else {
                     cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
                 }
@@ -1366,12 +1899,22 @@
             no_sanding_row++;
         }
 
-        ws_no_sanding.getColumn(1).width = 5;
-        ws_no_sanding.getColumn(2).width = 15;
-        ws_no_sanding.getColumn(3).width = 35;
-        ws_no_sanding.getColumn(4).width = 30;
-        ws_no_sanding.getColumn(5).width = 18;
-        ws_no_sanding.getColumn(6).width = 45;
+        if (unique_unmatched.length === 0) {
+            ws_no_sanding.mergeCells("A5:F5");
+            const ok = ws_no_sanding.getCell('A5');
+            ok.value = "Bagus — semua paket RUP punya sandingan MAK yang valid di RKA.";
+            ok.font = { name: FONT, size: 10, bold: true, color: { argb: 'FF166534' } };
+            ok.fill = solid(LIGHT_GREEN);
+            ok.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+            ws_no_sanding.getRow(5).height = 22;
+            for (let c = 1; c <= 6; c++) ws_no_sanding.getCell(5, c).border = border_thin;
+            no_sanding_row = 6;
+        }
+
+        finishSheet(ws_no_sanding, {
+            headerRow: 4, lastRow: no_sanding_row - 1, lastCol: 6,
+            tabColor: unique_unmatched.length ? 'FFC00000' : 'FF375623'
+        });
 
 
         // ----------------- SHEET 4 & 5: DETAIL PER PROGRAM -----------------
@@ -1379,34 +1922,30 @@
             const prog_code = prog.text.split("]")[0].replace("[", "").trim();
             const sheet_name = `Detail - ${prog_code}`;
             const ws = wb.addWorksheet(sheet_name);
-            ws.views = [{ showGridLines: true }];
-            
-            ws.getCell('A1').value = `DETAIL RENCANA KERJA ANGGARAN (RKA) - PROGRAM ${prog_code}`;
-            ws.getCell('A1').font = { name: "Segoe UI", size: 16, bold: true, color: { argb: 'FF1F497D' } };
-            ws.mergeCells("A1:S1");
-            
-            ws.getCell('A3').value = "Program:";
-            ws.getCell('A3').font = { name: "Segoe UI", size: 10, bold: true };
-            ws.getCell('B3').value = prog.text;
-            ws.getCell('B3').font = { name: "Segoe UI", size: 10 };
-            ws.mergeCells("B3:S3");
-            
+
+            writeTitle(ws, `DETAIL RKA & SANDINGAN RUP — PROGRAM ${prog_code}`, "S");
+
+            ws.mergeCells("A3:S3");
+            ws.getCell('A3').value = prog.text;
+            ws.getCell('A3').font = { name: FONT, size: 10, bold: true, color: { argb: DARK_BLUE } };
+            ws.getCell('A3').fill = solid(LIGHT_BLUE_LVL1);
+            ws.getCell('A3').alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+            ws.getRow(3).height = 20;
+
             const headers_det = [
-                "Kegiatan", "KRO (Output)", "RO (Sub-Output)", "Komponen", "Kode (P/K/O/SO/K/SK/A/D)",
+                "Kegiatan", "KRO (Output)", "RO (Sub-Output)", "Komponen", "Kode",
                 "Uraian", "Uraian Sebelum Revisi", "Pagu RKA", "Pagu Sebelum Revisi",
-                "P", "S", "Multiyears", "NP", "Gaji",
-                "ID Paket RUP", "Nama Paket RUP", "Pagu RUP (Announced)", "Selisih Pengadaan", "Rencana Pemilihan"
+                "P", "S", "MY", "NP", "Gaji",
+                "ID Paket RUP", "Nama Paket RUP", "Pagu RUP Terumumkan", "Selisih Pengadaan", "Rencana Pemilihan"
             ];
-            
-            for (let c = 1; c <= headers_det.length; c++) {
-                const cell = ws.getCell(5, c);
-                cell.value = headers_det[c-1];
-                cell.font = { name: "Segoe UI", size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DARK_BLUE } };
-                cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-                cell.border = border_thin;
-            }
-            
+
+            writeHeader(ws, 5, headers_det,
+                [26, 26, 26, 26, 16, 46, 46, 16, 16, 5, 5, 5, 5, 5, 16, 32, 20, 20, 18]);
+            ws.getCell(5, 10).note = "P = Pengadaan";
+            ws.getCell(5, 11).note = "S = Swakelola";
+            ws.getCell(5, 12).note = "MY = Multiyears";
+            ws.getCell(5, 13).note = "NP = Non-Pengadaan";
+
             let curr_row = 6;
             const matched_rup_indices = new Set();
             
@@ -1425,6 +1964,7 @@
                             
                             const comp_key = `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}`;
                             const comp_rup_lines = rup_all_lines.filter(l => l.comp_key === comp_key);
+                            const komp_rows = komp.rows || [];
                             
                             const start_row = curr_row;
                             
@@ -1437,8 +1977,8 @@
                             let subkomp_np = false, subkomp_gj = false;
                             let akun_np = false, akun_gj = false;
                             
-                            for (let r_idx = 0; r_idx < komp.rows.length; r_idx++) {
-                                const r = komp.rows[r_idx];
+                            for (let r_idx = 0; r_idx < komp_rows.length; r_idx++) {
+                                const r = komp_rows[r_idx];
                                 const pagu = typeof r.pagu === 'number' ? r.pagu : 0;
                                 
                                 if (r.level === 0) {
@@ -1461,8 +2001,8 @@
                             
                             // Calculate level 2 (Akun) target pagus
                             let curr_akun_idx = null;
-                            for (let r_idx = 0; r_idx < komp.rows.length; r_idx++) {
-                                const r = komp.rows[r_idx];
+                            for (let r_idx = 0; r_idx < komp_rows.length; r_idx++) {
+                                const r = komp_rows[r_idx];
                                 if (r.level === 2) {
                                     curr_akun_idx = r_idx;
                                     rows_target[r_idx] = 0;
@@ -1473,8 +2013,8 @@
                             
                             // Calculate level 1 (Sub-komponen) target pagus
                             let curr_sub_idx = null;
-                            for (let r_idx = 0; r_idx < komp.rows.length; r_idx++) {
-                                const r = komp.rows[r_idx];
+                            for (let r_idx = 0; r_idx < komp_rows.length; r_idx++) {
+                                const r = komp_rows[r_idx];
                                 if (r.level === 1) {
                                     curr_sub_idx = r_idx;
                                     rows_target[r_idx] = 0;
@@ -1485,8 +2025,8 @@
                             
                             // Calculate level 0 (Komponen) target pagus
                             let curr_komp_idx = null;
-                            for (let r_idx = 0; r_idx < komp.rows.length; r_idx++) {
-                                const r = komp.rows[r_idx];
+                            for (let r_idx = 0; r_idx < komp_rows.length; r_idx++) {
+                                const r = komp_rows[r_idx];
                                 if (r.level === 0) {
                                     curr_komp_idx = r_idx;
                                     rows_target[r_idx] = 0;
@@ -1499,8 +2039,8 @@
                             const detail_row_objects = [];
                             let curr_subkomp = "";
                             let curr_akun = "";
-                            for (let r_idx = 0; r_idx < komp.rows.length; r_idx++) {
-                                const r = komp.rows[r_idx];
+                            for (let r_idx = 0; r_idx < komp_rows.length; r_idx++) {
+                                const r = komp_rows[r_idx];
                                 if (r.level === 1) {
                                     curr_subkomp = r.code;
                                 } else if (r.level === 2) {
@@ -1611,8 +2151,8 @@
                             let subkomp_code = "";
                             let akun_code = "";
                             
-                            for (let row_idx_in_comp = 0; row_idx_in_comp < komp.rows.length; row_idx_in_comp++) {
-                                const row_data = komp.rows[row_idx_in_comp];
+                            for (let row_idx_in_comp = 0; row_idx_in_comp < komp_rows.length; row_idx_in_comp++) {
+                                const row_data = komp_rows[row_idx_in_comp];
                                 const level = row_data.level;
                                 const code = row_data.code;
                                 const desc = row_data.desc;
@@ -1635,14 +2175,14 @@
                                 
                                 if (typeof pagu === 'number') {
                                     ws.getCell(curr_row, 8).value = pagu;
-                                    ws.getCell(curr_row, 8).numFormat = '#,##0';
+                                    ws.getCell(curr_row, 8).numFmt ='#,##0';
                                 } else {
                                     ws.getCell(curr_row, 8).value = pagu;
                                 }
                                 
                                 if (typeof pagu_prev === 'number') {
                                     ws.getCell(curr_row, 9).value = pagu_prev;
-                                    ws.getCell(curr_row, 9).numFormat = '#,##0';
+                                    ws.getCell(curr_row, 9).numFmt ='#,##0';
                                 } else {
                                     ws.getCell(curr_row, 9).value = pagu_prev;
                                 }
@@ -1708,18 +2248,18 @@
                                 
                                 if (is_np_gaji) {
                                     ws.getCell(curr_row, 17).value = 0;
-                                    ws.getCell(curr_row, 17).numFormat = '#,##0';
+                                    ws.getCell(curr_row, 17).numFmt ='#,##0';
                                     ws.getCell(curr_row, 17).alignment = { horizontal: 'right', vertical: 'middle' };
                                     ws.getCell(curr_row, 18).value = 0;
-                                    ws.getCell(curr_row, 18).numFormat = '#,##0';
+                                    ws.getCell(curr_row, 18).numFmt ='#,##0';
                                     ws.getCell(curr_row, 18).alignment = { horizontal: 'right', vertical: 'middle' };
                                 } else {
                                     ws.getCell(curr_row, 17).value = rup_pagu_val;
-                                    ws.getCell(curr_row, 17).numFormat = '#,##0';
+                                    ws.getCell(curr_row, 17).numFmt ='#,##0';
                                     ws.getCell(curr_row, 17).alignment = { horizontal: 'right', vertical: 'middle' };
                                     
                                     ws.getCell(curr_row, 18).value = target_pagu - rup_pagu_val;
-                                    ws.getCell(curr_row, 18).numFormat = '#,##0';
+                                    ws.getCell(curr_row, 18).numFmt ='#,##0';
                                     ws.getCell(curr_row, 18).alignment = { horizontal: 'right', vertical: 'middle' };
                                 }
                                 
@@ -1793,10 +2333,10 @@
                                 for (let r = start_row; r <= end_row; r++) {
                                     for (let c = 1; c <= 4; c++) {
                                         const cell = ws.getCell(r, c);
-                                        cell.font = { name: "Segoe UI", size: 9, color: { argb: 'FF333333' } };
-                                        cell.alignment = { horizontal: 'left', vertical: 'center', wrapText: true };
+                                        cell.font = { name: FONT, size: 9, color: { argb: 'FF333333' } };
+                                        cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
                                         cell.border = border_thin;
-                                        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FAFBFD' } };
+                                        cell.fill = solid('FFFAFBFD');
                                     }
                                 }
                                 
@@ -1814,35 +2354,52 @@
                 }
             }
             
-            ws.autoFilter = 'E5:S' + (curr_row - 1);
-            
-            ws.views = [
-                { state: 'frozen', xSplit: 0, ySplit: 5, activeCell: 'A6' }
-            ];
-            
-            ws.getColumn(1).width = 25;
-            ws.getColumn(2).width = 25;
-            ws.getColumn(3).width = 25;
-            ws.getColumn(4).width = 25;
-            ws.getColumn(5).width = 15;
-            ws.getColumn(6).width = 45;
-            ws.getColumn(7).width = 45;
-            ws.getColumn(8).width = 15;
-            ws.getColumn(9).width = 15;
-            for (let c = 10; c <= 14; c++) ws.getColumn(c).width = 8;
-            ws.getColumn(15).width = 15;
-            ws.getColumn(16).width = 30;
-            ws.getColumn(17).width = 20;
-            ws.getColumn(18).width = 20;
-            ws.getColumn(19).width = 18;
+            // Kolom A–D (Kegiatan/KRO/RO/Komponen) ikut dibekukan supaya konteks
+            // baris tidak hilang saat menggeser ke kanan. Autofilter mulai kolom E
+            // karena A–D berisi sel gabungan.
+            finishSheet(ws, {
+                headerRow: 5, freezeCols: 4, filterFromCol: 5,
+                lastRow: curr_row - 1, lastCol: 19, tabColor: MID_BLUE
+            });
         }
 
         // Save file
+        const safeSatker = (ctx.satkerName || 'Satker')
+            .replace(/[\\/:*?"<>|]/g, '')
+            .replace(/\s+/g, '_')
+            .slice(0, 60);
+        const d = new Date();
+        const dateTag = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+        const fileName = `Sanding_RKA_RUP_${safeSatker}_TA${ctx.tahun}_${dateTag}.xlsx`;
+
         const buffer = await wb.xlsx.writeBuffer();
         const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-        saveAs(blob, 'rekap_rka_rup_sanding.xlsx');
+        saveAs(blob, fileName);
+
+        return {
+            fileName,
+            packets: rupPackets.length,
+            pct: tot_pct,
+            unmatched: unique_unmatched_count
+        };
     }
 
-    // Run injector
-    setTimeout(injectButton, 2000);
+    // ═════════════════════════════════════════════════════════════════ INIT ══
+    // SiRUP memuat sebagian halaman lewat AJAX, jadi tombol dipasang ulang
+    // kalau body sempat di-render ulang.
+    function init() {
+        injectStyles();
+        injectButton();
+
+        const obs = new MutationObserver(() => {
+            if (!document.getElementById('srx-fab')) injectButton();
+        });
+        obs.observe(document.body, { childList: true, subtree: false });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => setTimeout(init, 800));
+    } else {
+        setTimeout(init, 800);
+    }
 })();
