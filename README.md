@@ -36,7 +36,7 @@ yang disimpan atau dikirim ke mana pun.
 
 | Sheet | Isi |
 |---|---|
-| **Dashboard Evaluasi** | Kartu KPI (pagu satker, non-pengadaan, target pengadaan, RUP terumumkan), capaian, statistik paket, 10 komponen dengan selisih terbesar, legenda warna |
+| **Dashboard Evaluasi** | Kartu KPI (pagu satker, non-pengadaan, target pengadaan, RUP terumumkan), capaian, statistik paket, kontrol silang total RUP, 10 komponen dengan selisih terbesar, legenda warna |
 | **Ringkasan Pagu** | Daftar seluruh komponen RKA beserta pagunya |
 | **Sanding RKA & RUP** | Inti laporan: per komponen — pagu RKA, non-pengadaan, target pengadaan, RUP terumumkan, selisih, capaian, status. Lengkap dengan subtotal RO → KRO → Kegiatan → Program |
 | **Daftar Paket RUP** | Semua paket penyedia beserta status A / FD / U dan komponen RKA yang tersanding |
@@ -58,6 +58,18 @@ cetak A4 fit-to-width dengan header berulang.
   ditampilkan sebagai peringatan berwarna oranye.
 - Satu paket RUP yang menutup beberapa baris RKA dialokasikan **proporsional**;
   sisa alokasi jatuh ke baris pertama pada kunci akun yang sama.
+
+## Kontrol silang angka RUP
+
+Dashboard menghitung total pagu RUP terumumkan dengan tiga cara: (A) dari daftar
+paket, (B) dari baris MAK hasil penarikan detail paket, (C) setelah disandingkan
+ke komponen RKA. Ketiganya seharusnya sama.
+
+- **B atau C lebih besar dari A** → ada pagu terhitung ganda; blok itu ditandai
+  merah beserta dugaan tahap penyebabnya, dan capaian di kartu KPI tidak bisa
+  dipakai apa adanya.
+- **A lebih besar dari B** → wajar, itu paket yang MAK-nya tidak terbaca;
+  daftarnya ada di sheet *Paket RUP Tanpa Sandingan*.
 
 ## Batasan yang diketahui
 
@@ -84,10 +96,18 @@ Node dengan ExcelJS asli dan data sintetis (stub `document`, `Blob`, dan `saveAs
 lalu baca ulang file hasilnya untuk memeriksa `numFmt`, warna, freeze pane, dan
 autofilter.
 
-> Catatan: properti format angka di ExcelJS adalah `cell.numFmt` — bukan
-> `numFormat`. Salah nama tidak memunculkan error apa pun, formatnya hanya diam-diam
-> tidak terpasang. Warna wajib ARGB 8 digit (`FF` + RRGGBB); nilai 6 digit dibaca
-> salah oleh Excel.
+Membaca ulang file dengan ExcelJS **tidak cukup** — ExcelJS jauh lebih longgar
+daripada Excel. Periksa juga XML mentah di dalam `.xlsx` (unzip, lalu cek
+`xl/worksheets/sheet*.xml`), karena beberapa kesalahan hanya ketahuan sebagai
+"Workbook Repaired" saat dibuka Excel.
+
+> Tiga jebakan yang pernah menggigit di repo ini:
+>
+> - Properti format angka adalah `cell.numFmt`, **bukan** `numFormat`. Salah nama
+>   tidak memunculkan error apa pun — formatnya diam-diam tidak terpasang.
+> - Warna wajib ARGB 8 digit (`FF` + RRGGBB); nilai 6 digit dibaca salah oleh Excel.
+> - `views: [{ state: 'frozen', xSplit: 0, ySplit: 0 }]` menghasilkan elemen
+>   `<pane>` tidak sah. Sheet tanpa titik beku harus memakai view biasa.
 
 Skrip Python satu kali pakai dari fase awal proyek disimpan di `legacy/` sebagai
 arsip — jalurnya masih menunjuk ke mesin penulis aslinya dan tidak dipakai lagi.

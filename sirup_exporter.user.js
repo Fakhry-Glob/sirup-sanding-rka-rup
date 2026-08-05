@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  Crawl RKA dan RUP dari SiRUP, lalu ekspor jadi laporan sanding Excel (dashboard, ringkasan, sanding berjenjang, detail per program). Tahun anggaran & satker terdeteksi otomatis.
 // @author       Fakhry-Glob
 // @match        https://sirup.inaproc.id/sirup/*
@@ -17,7 +17,7 @@
 
     // ═════════════════════════════════════════════════════════ KONFIGURASI ══
     const APP_TITLE = 'Sanding RKA & RUP';
-    const APP_VERSION = '2.0';
+    const APP_VERSION = '2.1';
 
     // Konteks runtime: diisi otomatis oleh detectContext(), bisa dikoreksi
     // pengguna lewat panel pra-ekspor sebelum crawling dimulai.
@@ -956,13 +956,15 @@
         // Freeze pane + autofilter + setelan cetak, dipanggil setelah sheet penuh.
         function finishSheet(ws, opts) {
             const o = opts || {};
-            ws.views = [{
-                state: 'frozen',
-                xSplit: o.freezeCols || 0,
-                ySplit: o.headerRow || 0,
-                showGridLines: false,
-                activeCell: 'A' + ((o.headerRow || 0) + 1)
-            }];
+            const xSplit = o.freezeCols || 0;
+            const ySplit = o.headerRow || 0;
+
+            // state:'frozen' dengan kedua split 0 menghasilkan elemen <pane> yang
+            // tidak sah — Excel menolaknya dan memunculkan "Workbook Repaired".
+            // Sheet tanpa titik beku harus memakai view biasa.
+            ws.views = (xSplit || ySplit)
+                ? [{ state: 'frozen', xSplit, ySplit, showGridLines: false, activeCell: 'A' + (ySplit + 1) }]
+                : [{ showGridLines: false }];
             if (o.headerRow && o.lastCol && o.lastRow && o.lastRow > o.headerRow) {
                 ws.autoFilter = {
                     from: { row: o.headerRow, column: o.filterFromCol || 1 },
@@ -978,9 +980,10 @@
                 fitToWidth: 1,
                 fitToHeight: 0,
                 horizontalCentered: true,
-                margins: { left: 0.3, right: 0.3, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 },
-                printTitlesRow: o.headerRow ? `${o.headerRow}:${o.headerRow}` : undefined
+                margins: { left: 0.3, right: 0.3, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 }
             };
+            // Hanya set kalau ada baris header; nilai undefined bikin definedName kosong.
+            if (o.headerRow) ws.pageSetup.printTitlesRow = `${o.headerRow}:${o.headerRow}`;
             ws.headerFooter = {
                 oddFooter: '&L&9' + (ctx.satkerName || '') + ' — TA ' + ctx.tahun + '&R&9Hal &P dari &N'
             };
@@ -1094,6 +1097,21 @@
             }
         }
         const top_gaps = comp_stats.filter(c => c.gap > 0).sort((a, b) => b.gap - a.gap).slice(0, 10);
+
+        // --- Kontrol silang total RUP ---
+        // Tiga cara menghitung pagu RUP terumumkan. Kalau ketiganya tidak sama,
+        // ada yang terhitung ganda — dan selisihnya menunjukkan di tahap mana.
+        //   A. dari daftar paket (satu baris per paket)  -> acuan kebenaran
+        //   B. dari baris MAK hasil crawl detail paket
+        //   C. dari hasil penyandingan ke komponen RKA   -> yang tampil di laporan
+        const xcheck_paket = rupPackets
+            .filter(p => p.aktif && p.fd && p.umumkan)
+            .reduce((s, p) => s + (p.pagu || 0), 0);
+        const xcheck_lines = rup_all_lines
+            .filter(l => l.is_terumumkan)
+            .reduce((s, l) => s + (l.pagu || 0), 0);
+        const xcheck_matched = total_rup_pagu;
+        const xcheck_ok = (a, b) => a === 0 ? b === 0 : Math.abs(a - b) / a <= 0.01;
 
         // Gather all RKA detailed Akun keys (7-parts)
         const rka_detailed_keys = new Set();
@@ -1288,8 +1306,79 @@
             ws_dash.getRow(r).height = 18;
         });
 
+        // --- Kontrol silang total RUP ---
+        let dash_row = stat_head_row + stats_data.length + 2;
+        ws_dash.getCell(`A${dash_row}`).value = "KONTROL SILANG TOTAL PAGU RUP TERUMUMKAN";
+        ws_dash.getCell(`A${dash_row}`).font = { name: FONT, size: 11, bold: true, color: { argb: DARK_BLUE } };
+        dash_row++;
+
+        const xrows = [
+            ["A. Dari daftar paket RUP (1 baris per paket)", xcheck_paket, "Acuan — angka apa adanya dari SiRUP"],
+            ["B. Dari baris MAK hasil penarikan detail paket", xcheck_lines, "Kalau > A, detail paket terbaca ganda"],
+            ["C. Setelah disandingkan ke komponen RKA", xcheck_matched, "Kalau > B, satu baris MAK cocok ke lebih dari satu komponen"]
+        ];
+
+        xrows.forEach((row, i) => {
+            const r = dash_row + i;
+            ws_dash.mergeCells(`A${r}:C${r}`);
+            ws_dash.mergeCells(`D${r}:E${r}`);
+            ws_dash.mergeCells(`F${r}:H${r}`);
+
+            ws_dash.getCell(`A${r}`).value = row[0];
+            ws_dash.getCell(`A${r}`).alignment = { horizontal: 'left', vertical: 'middle', indent: 1, wrapText: true };
+            ws_dash.getCell(`D${r}`).value = row[1];
+            ws_dash.getCell(`D${r}`).numFmt = FMT_RP;
+            ws_dash.getCell(`D${r}`).alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+            ws_dash.getCell(`F${r}`).value = row[2];
+            ws_dash.getCell(`F${r}`).alignment = { horizontal: 'left', vertical: 'middle', indent: 1, wrapText: true };
+
+            // Hanya pembengkakan yang ditandai merah. B atau C lebih KECIL dari A
+            // itu wajar: paket ber-MAK tidak valid memang tidak punya sandingan,
+            // dan sudah didaftar tersendiri di sheet "Paket RUP Tanpa Sandingan".
+            const membengkak = (i === 1 && xcheck_lines > xcheck_paket * 1.01) ||
+                               (i === 2 && xcheck_matched > xcheck_lines * 1.01);
+            for (let c = 1; c <= 8; c++) {
+                const cell = ws_dash.getCell(r, c);
+                cell.border = border_thin;
+                cell.font = { name: FONT, size: 9.5, color: { argb: membengkak ? 'FF991B1B' : INK } };
+                if (membengkak) cell.fill = solid(LIGHT_RED);
+            }
+            ws_dash.getRow(r).height = 18;
+        });
+        dash_row += xrows.length;
+
+        const bengkak_detail = xcheck_lines > xcheck_paket * 1.01;
+        const bengkak_sanding = xcheck_matched > xcheck_lines * 1.01;
+
+        if (bengkak_detail || bengkak_sanding) {
+            const sebab = bengkak_sanding
+                ? "Penyebabnya di tahap penyandingan: satu baris MAK cocok ke lebih dari satu komponen RKA " +
+                  "(kemungkinan ada kode komponen kembar di pohon RKA)."
+                : "Penyebabnya di tahap penarikan detail paket: tabel sumber dana terbaca lebih dari sekali per paket.";
+            ws_dash.mergeCells(`A${dash_row}:H${dash_row}`);
+            const warn = ws_dash.getCell(`A${dash_row}`);
+            warn.value = "PERINGATAN: total pagu RUP membengkak — ada pagu yang terhitung lebih dari sekali, " +
+                "sehingga capaian di kartu KPI tidak bisa dipakai apa adanya. " + sebab;
+            warn.font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FF991B1B' } };
+            warn.fill = solid(LIGHT_ORANGE);
+            warn.alignment = { horizontal: 'left', vertical: 'middle', indent: 1, wrapText: true };
+            for (let c = 1; c <= 8; c++) ws_dash.getCell(dash_row, c).border = border_thin;
+            ws_dash.getRow(dash_row).height = 32;
+            dash_row++;
+        } else if (xcheck_paket > xcheck_lines * 1.01) {
+            ws_dash.mergeCells(`A${dash_row}:H${dash_row}`);
+            const note = ws_dash.getCell(`A${dash_row}`);
+            note.value = `Selisih A ke B sebesar ${rp(xcheck_paket - xcheck_lines)} berasal dari paket ` +
+                "yang MAK-nya tidak terbaca — daftarnya ada di sheet \"Paket RUP Tanpa Sandingan\".";
+            note.font = { name: FONT, size: 9.5, italic: true, color: { argb: INK_SOFT } };
+            note.alignment = { horizontal: 'left', vertical: 'middle', indent: 1, wrapText: true };
+            for (let c = 1; c <= 8; c++) ws_dash.getCell(dash_row, c).border = border_thin;
+            ws_dash.getRow(dash_row).height = 20;
+            dash_row++;
+        }
+
         // --- Tabel 10 selisih terbesar ---
-        let dash_row = stat_head_row + stats_data.length + 3;
+        dash_row += 2;
         ws_dash.getCell(`A${dash_row}`).value = "10 KOMPONEN DENGAN SELISIH PENGADAAN TERBESAR";
         ws_dash.getCell(`A${dash_row}`).font = { name: FONT, size: 11, bold: true, color: { argb: DARK_BLUE } };
         dash_row++;
