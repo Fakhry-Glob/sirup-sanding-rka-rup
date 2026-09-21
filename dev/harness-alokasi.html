@@ -47,6 +47,20 @@ if (WITH_EXCESS) PACKETS.push({ id: 'X1', name: 'Paket Kelebihan',        pagu: 
 if (WITH_NP)     PACKETS.push({ id: 'N1', name: 'Paket atas pagu NP',     pagu: 4000000, mak: MAK_NP });
 if (WITH_NOKEY)  PACKETS.push({ id: 'K1', name: 'Paket MAK salah akun',   pagu: 3000000, mak: MAK_XX });
 
+// ?swa=1 -> paket swakelola: kolom daftar beda (Sumber Dana & Waktu tertukar,
+// MAK di kolom 12) dan tabel pendanaannya 5 kolom serta ter-nest.
+const WITH_SWA = Q.has('swa');
+const SWAKELOLA = WITH_SWA
+  ? [{ id: 'S1', name: 'Paket Swakelola',    pagu: 6000000, mak: MAK_AB, aktif: 'true'  },
+     { id: 'S2', name: 'Swakelola Nonaktif', pagu: 9000000, mak: MAK_AB, aktif: 'false' }]
+  : [];
+
+// ?kembar=1 -> dua paket identik (nama, MAK, pagu sama persis)
+if (Q.has('kembar')) {
+  PACKETS.push({ id: 'D1', name: 'Paket Kembar', pagu: 1000000, mak: MAK_AB });
+  PACKETS.push({ id: 'D2', name: 'Paket Kembar', pagu: 1000000, mak: MAK_AB });
+}
+
 const json = (o) => Promise.resolve(new Response(JSON.stringify(o), {status:200, headers:{'content-type':'application/json'}}));
 const html = (t) => Promise.resolve(new Response(t, {status:200, headers:{'content-type':'text/html'}}));
 
@@ -68,10 +82,36 @@ window.fetch = async function (url, opts) {
   const u = String(url);
   if (u.includes('daftarkegiatanbyprogram'))  return json([{id:'K1', nama:'Kegiatan Uji', kode_kegiatans:'2375'}]);
   if (u.includes('daftaroutputbykegiatan'))   return json([{id:'O1', nama:'Output Uji', kode_output_string:'SCC'}]);
-  if (u.includes('daftarsuboutputbyoutput'))  return json([{id:'R1', nama:'RO Uji', kode_suboutput_string:'831'}]);
-  if (u.includes('daftarkomponenbysuboutput'))return json([{id:'C1', nama:'Komponen Uji', kode_komponen_string:'101', pagu:60000000}]);
+  // ?tahunbeda=1 -> RKA menurut sesi TA 2025, sementara panel memilih TA 2026
+  if (u.includes('daftarsuboutputbyoutput'))  return json([{id:'R1', nama:'RO Uji', kode_suboutput_string:'831',
+                                                            tahun_anggaran: Q.has('tahunbeda') ? '2025' : '2026'}]);
+  // ?bentrok=1 -> dua komponen berkode sama di bawah satu RO (kunci bertabrakan)
+  if (u.includes('daftarkomponenbysuboutput')) return json(Q.has('bentrok')
+    ? [{id:'C1', nama:'Komponen Uji', kode_komponen_string:'101', pagu:60000000},
+       {id:'C2', nama:'Komponen Sama', kode_komponen_string:'101', pagu:60000000}]
+    : [{id:'C1', nama:'Komponen Uji', kode_komponen_string:'101', pagu:60000000}]);
   if (u.includes('rkakontentable2018'))       return html(RKA_TABLE);
-  if (u.includes('datarupswakelola2018'))     return json({aaData: []});
+  if (u.includes('datarupswakelola2018')) {
+    // urutan kolom asli swakelola: [4]=Sumber Dana, [5]=Mulai Pekerjaan, MAK di [12]
+    const rows = SWAKELOLA.map(p => ([ p.id, 'Kegiatan Uji', p.name,
+      String(p.pagu).replace(/\B(?=(\d{3})+(?!\d))/g,'.'),
+      'APBN, APBN', 'January 2026', p.aktif, 'true', 'true', '51', 'false', 'N/A', '2026.14564.' + p.mak ]));
+    return json({ aaData: rows, iTotalDisplayRecords: rows.length, iTotalRecords: rows.length });
+  }
+  if (u.includes('/sirup/swakelola/')) {
+    const id = u.split('/').pop();
+    const p = SWAKELOLA.find(x => x.id === id);
+    // tabel pendanaan 5 kolom, DI DALAM tabel info -- persis seperti SiRUP
+    return html(`<html><body><table>
+      <tr><td>Kode RUP</td><td>${p.id}</td></tr>
+      <tr><td>Nama Paket</td><td>${p.name}</td></tr>
+      <tr><td colspan="2"><table>
+        <tr><th>No.</th><th>Sumber Dana</th><th>KLPD</th><th>MAK</th><th>Pagu</th></tr>
+        <tr><td>1.</td><td>APBN</td><td>KKP</td><td>${p.mak}</td>
+            <td>Rp. ${String(p.pagu).replace(/\B(?=(\d{3})+(?!\d))/g,'.')}</td></tr>
+      </table></td></tr>
+    </table></body></html>`);
+  }
   if (u.includes('dataruppenyedia2018')) {
     const rows = PACKETS.map(p => ([ p.id, 'Kegiatan Uji', p.name, String(p.pagu).replace(/\B(?=(\d{3})+(?!\d))/g,'.'),
       'Januari', 'APBN', '<input type="checkbox" checked>', '<input type="checkbox" checked>',
@@ -81,10 +121,15 @@ window.fetch = async function (url, opts) {
   if (u.includes('/sirup/penyedia/')) {
     const id = u.split('/').pop();
     const p = PACKETS.find(x => x.id === id);
+    // tabel pendanaan 6 kolom, ter-nest di dalam tabel info -- seperti SiRUP
     return html(`<html><body><table>
-      <tr><th>No</th><th>Uraian</th><th>Jenis</th><th>Sumber Dana</th><th>MAK</th><th>Pagu</th></tr>
-      <tr><td>1.</td><td>x</td><td>y</td><td>APBN</td><td>${p.mak}</td>
-          <td>Rp. ${String(p.pagu).replace(/\B(?=(\d{3})+(?!\d))/g,'.')}</td></tr>
+      <tr><td>Kode RUP</td><td>${p.id}</td></tr>
+      <tr><td>Nama Paket</td><td>${p.name}</td></tr>
+      <tr><td colspan="2"><table>
+        <tr><th>No</th><th>Uraian</th><th>Jenis</th><th>Sumber Dana</th><th>MAK</th><th>Pagu</th></tr>
+        <tr><td>1.</td><td>x</td><td>y</td><td>APBN</td><td>${p.mak}</td>
+            <td>Rp. ${String(p.pagu).replace(/\B(?=(\d{3})+(?!\d))/g,'.')}</td></tr>
+      </table></td></tr>
     </table></body></html>`);
   }
   return origFetch(url, opts);

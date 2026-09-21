@@ -71,6 +71,9 @@ cetak A4 fit-to-width dengan header berulang.
 - Hanya paket berstatus **A + FD + U** (draft PPK, final draft, dan sudah
   diumumkan KPA) yang dihitung sebagai realisasi RUP. Paket draft/batal tetap
   ditampilkan sebagai peringatan berwarna oranye.
+- **Paket penyedia dan swakelola dua-duanya ikut disanding** sejak v3.0, dengan
+  aturan A+FD+U yang sama. Kalau tidak ada satu pun swakelola yang lolos A+FD+U,
+  log menyebutnya supaya kolom A di SiRUP bisa diperiksa dulu.
 ### Alokasi paket ke baris RKA
 
 Baris RKA diisi berurutan; tiap baris menyerap `min(sisa pagu baris, sisa pagu
@@ -139,13 +142,29 @@ ke komponen RKA. Ketiganya seharusnya sama.
 - **A lebih besar dari B** → wajar, itu paket yang MAK-nya tidak terbaca;
   daftarnya ada di sheet *Paket RUP Tanpa Sandingan*.
 
+## Penjaga sebelum & selama penarikan
+
+Beberapa hal dulu bisa lolos diam-diam dan menghasilkan laporan yang tampak wajar
+tapi salah. Sekarang masing-masing punya penjaga sendiri:
+
+| Penjaga | Kapan berbunyi |
+|---|---|
+| **Tahun tidak cocok** — ekspor dihentikan | Halaman RKA selalu mengikuti tahun aktif **sesi** SiRUP; dropdown di panel hanya menggerakkan sisi RUP. Kalau keduanya beda, laporan akan menyanding dua tahun berlainan dan tetap diberi label tahun panel. Ganti tahun aktif lewat menu SiRUP, bukan lewat panel. |
+| **Kode satker pada MAK** | Awalan MAK memuat kode satker pemilik pagu. Kalau paket berasal dari lebih dari satu satker, itu disebut — parameter `idSatker` yang dikirim ke SiRUP hanya tebakan dan bisa diabaikan server, sementara nama satker di kop diketik manual. |
+| **Kunci komponen bertabrakan** | Dua komponen menghasilkan `program.kegiatan.KRO.RO.komponen` yang sama, atau ada kode yang kosong. Pagu RUP pada kunci itu terhitung ganda. |
+| **Paket kembar** | Nama, MAK, dan pagu sama persis — biasanya entri ganda. |
+| **Tabel pendanaan tidak dikenali** | Menyebut berapa dari sekian paket yang gagal dibaca. Kalau angkanya besar, struktur halaman SiRUP berubah dan laporannya tidak bisa dipakai. |
+| **Penarikan gagal sebagian** | Jumlah tabel komponen RKA atau detail paket yang gagal ditarik. |
+
 ## Batasan yang diketahui
 
-- **Paket swakelola belum ikut disandingkan.** Jumlahnya dilaporkan sebagai
-  catatan di log, tapi tidak masuk perhitungan.
 - Butuh sesi login SiRUP yang aktif; script tidak melakukan autentikasi sendiri.
   Kalau sesi habis di tengah jalan, proses berhenti dengan pesan jelas — bukan
   menghasilkan laporan berisi nol.
+- **Pagu blokir / catatan halaman IV DIPA tidak terlihat** dari data yang ditarik.
+  Pagu yang diblokir tetap dihitung sebagai target pengadaan, jadi selisihnya
+  bisa wajar tanpa bisa dibedakan otomatis.
+- Laporan ini **potret saat diekspor**. Status paket bisa berubah setelahnya.
 - Deteksi tahun anggaran & nama satker mengandalkan struktur halaman SiRUP. Kalau
   SiRUP mengubah markup-nya, nilai itu bisa meleset — makanya keduanya bisa
   dikoreksi manual di panel sebelum ekspor.
@@ -213,6 +232,10 @@ Tiap jenis temuan punya sakelarnya sendiri, bisa digabung:
 | `?excess=1` | Paket 5.000.000 yang tidak muat di mana pun |
 | `?np=1` | Paket dibuat di atas pagu ber-tanda NP |
 | `?nokey=1` | MAK menunjuk akun yang tidak ada di RKA |
+| `?swa=1` | Paket swakelola — kolom daftar tertukar, tabel pendanaan 5 kolom & ter-nest |
+| `?kembar=1` | Dua paket identik (nama, MAK, pagu sama persis) |
+| `?bentrok=1` | Dua komponen berkode sama di bawah satu RO |
+| `?tahunbeda=1` | RKA sesi TA 2025 sementara panel TA 2026 — ekspor harus berhenti |
 
 Baris *Pagu A* sengaja dibuat berubah saat revisi (25.000.000 → 30.000.000)
 supaya catatan bukti revisi ikut teruji.

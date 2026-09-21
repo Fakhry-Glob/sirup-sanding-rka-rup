@@ -138,7 +138,22 @@ window.fetch = async function (url, opts) {
     return json({ aaData: rows, iTotalDisplayRecords: TOTAL_PACKETS, iTotalRecords: TOTAL_PACKETS }, 120);
   }
 
-  if (u.includes('datarupswakelola2018')) return json({ aaData: [1, 2, 3] }, 40);
+  if (u.includes('datarupswakelola2018')) {
+    // kolom swakelola: [4]=Sumber Dana, [5]=Mulai Pekerjaan, MAK di [12]
+    const rows = [0,1,2].map(i => ([ 'SWA'+i, 'Kegiatan Pelatihan Vokasi', 'Swakelola '+i,
+      '2.000.000', 'APBN', 'Januari', i === 0 ? 'true' : 'false', 'true', 'true',
+      '51', 'false', 'N/A', '2026.14564.' + DETAIL_MAK ]));
+    return json({ aaData: rows, iTotalDisplayRecords: rows.length, iTotalRecords: rows.length }, 40);
+  }
+  if (u.includes('/sirup/swakelola/')) {
+    return html(`<html><body><table>
+      <tr><td>Kode RUP</td><td>x</td></tr>
+      <tr><td colspan="2"><table>
+        <tr><th>No.</th><th>Sumber Dana</th><th>KLPD</th><th>MAK</th><th>Pagu</th></tr>
+        <tr><td>1.</td><td>APBN</td><td>KKP</td><td>${DETAIL_MAK}</td><td>Rp. 2.000.000</td></tr>
+      </table></td></tr>
+    </table></body></html>`);
+  }
 
   if (u.includes('/sirup/penyedia/')) {
     const i = +(u.match(/PKT(\d+)/) || [0, 0])[1];

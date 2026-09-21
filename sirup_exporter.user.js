@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      3.0
 // @description  Crawl RKA dan RUP dari SiRUP, lalu ekspor jadi laporan sanding Excel (dashboard, ringkasan, sanding berjenjang, detail per program). Tahun anggaran & satker terdeteksi otomatis.
 // @author       Fakhry-Glob
 // @match        https://sirup.inaproc.id/sirup/*
@@ -17,7 +17,7 @@
 
     // ═════════════════════════════════════════════════════════ KONFIGURASI ══
     const APP_TITLE = 'Sanding RKA & RUP';
-    const APP_VERSION = '2.6';
+    const APP_VERSION = '3.0';
 
     // Konteks runtime: diisi otomatis oleh detectContext(), bisa dikoreksi
     // pengguna lewat panel pra-ekspor sebelum crawling dimulai.
@@ -784,6 +784,17 @@
         return parts;
     }
 
+    // Awalan MAK memuat tahun anggaran dan kode satker pemilik pagu. Dua-duanya
+    // dipakai sebagai penjaga: laporan pernah bisa terbit dengan RKA satu tahun
+    // disanding RUP tahun lain, atau berlabel satker yang bukan pemilik datanya.
+    function makPrefix(mak) {
+        const parts = (mak == null ? '' : String(mak)).replace(/\s+/g, "").split(".");
+        if (parts.length >= 7 && /^20\d{2}$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
+            return { tahun: parts[0], satker: parts[1] };
+        }
+        return null;
+    }
+
     // Robust MAK parser. Mengembalikan null kalau MAK belum lengkap sampai akun.
     function parseMak(mak) {
         if (!mak) return null;
@@ -817,6 +828,60 @@
                    'Lengkapi MAK paket ini di SiRUP.';
         }
         return "Format Kode MAK di RUP tidak valid";
+    }
+
+    // Tabel pendanaan di halaman detail paket TER-NEST di dalam tabel info, dan
+    // jumlah kolomnya berbeda antar jenis paket:
+    //   penyedia  : No | Uraian | Jenis | Sumber Dana | MAK | Pagu   (6 kolom)
+    //   swakelola : No | Sumber Dana | KLPD | MAK | Pagu             (5 kolom)
+    // Versi lama mengunci tds[4]/tds[5] dan mensyaratkan >= 6 kolom — kebetulan
+    // selamat untuk penyedia (baris info yang cuma 2 sel ikut tersaring), tapi
+    // seluruh baris swakelola ikut terbuang. Jadi kolomnya dicari lewat header.
+    // Mengembalikan null kalau header MAK/Pagu tidak ketemu sama sekali.
+    function parseFundingTable(doc) {
+        // Sel harus diambil dari ANAK LANGSUNG baris. querySelectorAll('th,td')
+        // pada sebuah <tr> juga mengembalikan sel milik tabel yang ter-nest di
+        // dalamnya, sehingga baris pembungkus terlihat punya belasan kolom dan
+        // indeks MAK/Pagu bergeser.
+        const selOf = (tr) => Array.from(tr.children)
+            .filter(c => c.tagName === 'TD' || c.tagName === 'TH');
+
+        const rows = Array.from(doc.querySelectorAll('tr'));
+        let makIdx = -1, paguIdx = -1, start = -1;
+
+        for (let i = 0; i < rows.length; i++) {
+            const cells = selOf(rows[i]).map(c => (c.innerText || '').trim().toLowerCase());
+            if (cells.length < 3) continue;   // baris info "label | nilai"
+            const mi = cells.findIndex(c => c === 'mak');
+            const pi = cells.findIndex(c => c === 'pagu' || c.startsWith('pagu'));
+            if (mi >= 0 && pi >= 0) { makIdx = mi; paguIdx = pi; start = i + 1; break; }
+        }
+        if (start < 0) return null;
+
+        const maxIdx = Math.max(makIdx, paguIdx);
+        const items = [];
+        for (let i = start; i < rows.length; i++) {
+            const tds = selOf(rows[i]).filter(c => c.tagName === 'TD');
+            if (tds.length <= maxIdx) continue;
+            if (!/^\d+\.?$/.test((tds[0].innerText || '').trim())) continue;
+            const mak = (tds[makIdx].innerText || '').trim();
+            const paguText = (tds[paguIdx].innerText || '')
+                .replace(/rp\.?/gi, '').replace(/\./g, '').trim();
+            items.push({ mak, pagu: parseInt(paguText) || 0 });
+        }
+        return items;
+    }
+
+    // MAK ada di kolom 13 untuk penyedia dan 12 untuk swakelola. Daripada
+    // mengunci indeks per jenis, cari sel yang berbentuk MAK.
+    function makFromRow(row) {
+        for (let i = row.length - 1; i >= 6; i--) {
+            const v = row[i];
+            if (typeof v === 'string' && /^[0-9A-Za-z]+(\.[0-9A-Za-z]+){4,}$/.test(v.trim())) {
+                return v.trim();
+            }
+        }
+        return "";
     }
 
     function parseRkaTable(html) {
@@ -917,6 +982,7 @@
             }
             
             const rkaData = [];
+            const tahunRkaTerlihat = new Set();
             let rkaFetchFailures = 0;
             let totalSteps = programs.length;
             let currentStep = 0;
@@ -949,6 +1015,11 @@
                         const suboutputs = await postForm('/sirup/selfservice/daftarsuboutputbyoutput', `idOutput=${out.id}`);
                         
                         for (const ro of suboutputs) {
+                            // Endpoint RKA tidak menerima parameter tahun — semuanya
+                            // ikut tahun aktif SESI. Kalau pengguna memilih tahun lain
+                            // di panel, hanya sisi RUP yang pindah. Tahun asli RKA
+                            // dicatat di sini supaya ketidakcocokan itu ketahuan.
+                            if (ro.tahun_anggaran) tahunRkaTerlihat.add(String(ro.tahun_anggaran));
                             const ro_code = ro.kode_suboutput_string || ro.kode_suboutput || ro.kode_sub_output_string || ro.kode || ro.kode_string || "";
                             const roData = { id: ro.id, name: ro.nama, code: ro_code, komponens: [] };
                             
@@ -994,6 +1065,52 @@
                     'sandingan detailnya ikut salah — ulangi ekspor sebelum angkanya dipakai.',
                     null, 'error');
             }
+            // Tahun RKA mengikuti sesi; tahun RUP mengikuti panel. Kalau berbeda,
+            // laporannya menyanding dua tahun yang berlainan dan tetap diberi label
+            // tahun panel. Lebih baik berhenti daripada menerbitkan itu.
+            if (tahunRkaTerlihat.size > 0 && !tahunRkaTerlihat.has(String(ctx.tahun))) {
+                const daftar = Array.from(tahunRkaTerlihat).join(', ');
+                throw new Error(
+                    `Tahun tidak cocok: data RKA yang terbaca adalah TA ${daftar}, ` +
+                    `sedangkan tahun yang dipilih di panel TA ${ctx.tahun}. ` +
+                    'Halaman RKA selalu mengikuti tahun aktif sesi SiRUP, bukan pilihan di panel. ' +
+                    `Ganti tahun aktif di menu SiRUP (pojok kanan atas) ke ${ctx.tahun} lalu ulangi, ` +
+                    `atau jalankan ekspor untuk TA ${daftar}.`);
+            }
+
+            // Kunci komponen harus unik. Kalau dua komponen menghasilkan kunci yang
+            // sama, paket RUP-nya dihitung untuk dua-duanya.
+            {
+                const terlihat = new Map();
+                const kosong = [];
+                for (const prog of rkaData) {
+                    const pc = prog.text.split("]")[0].replace("[", "").trim();
+                    for (const keg of prog.kegiatans || []) {
+                        for (const out of keg.outputs || []) {
+                            for (const ro of out.suboutputs || []) {
+                                for (const komp of ro.komponens || []) {
+                                    const ck = `${pc}.${keg.code}.${out.code}.${ro.code}.${komp.code}`;
+                                    if (ck.split('.').some(x => !x)) kosong.push(`${ck} (${komp.name})`);
+                                    terlihat.set(ck, (terlihat.get(ck) || 0) + 1);
+                                }
+                            }
+                        }
+                    }
+                }
+                const ganda = Array.from(terlihat.entries()).filter(([, n]) => n > 1);
+                if (ganda.length > 0) {
+                    log(`PERINGATAN: ${ganda.length} kunci komponen dipakai lebih dari satu komponen ` +
+                        `(${ganda.slice(0, 3).map(([k, n]) => `${k} x${n}`).join('; ')}). ` +
+                        'Pagu RUP pada kunci itu terhitung ganda — periksa kontrol silang di Dashboard.',
+                        null, 'error');
+                }
+                if (kosong.length > 0) {
+                    log(`PERINGATAN: ${kosong.length} komponen punya kode kosong pada kunci ` +
+                        `(${kosong.slice(0, 2).join('; ')}). Komponen tanpa kode saling bertabrakan ` +
+                        'dan pagunya bisa terhitung ganda.', null, 'error');
+                }
+            }
+
             log('Pengambilan data RKA selesai!', 50);
 
             // 2. Crawl RUP Penyedia via Direct XHR
@@ -1004,65 +1121,93 @@
             const satkerBody = activeSatkerId
                 ? `&idSatker=${activeSatkerId}&satker=${activeSatkerId}&id_satker=${activeSatkerId}`
                 : '';
-            const rupBody = `draw=1&start=0&length=${RUP_PAGE_SIZE}${satkerBody}`;
 
-            const rupRes = await postForm(`/sirup/datatablectr/dataruppenyedia2018?tahun=${ctx.tahun}`, rupBody);
-            const rupRows = rupRes.aaData || [];
+            // Urutan kolom daftar berbeda antar jenis. Header aslinya:
+            //   penyedia  : No | Nama Kegiatan | Nama Paket | Pagu | Waktu Pemilihan | Sumber Dana | A | FD | U
+            //   swakelola : No | Kegiatan      | Nama Paket | Pagu | Sumber Dana     | Mulai Pekerjaan | A | FD | U
+            // Kolom 4 dan 5 tertukar; A/FD/U sama-sama di 6/7/8.
+            const RUP_SOURCES = [
+                { jenis: 'penyedia',  endpoint: 'dataruppenyedia2018',  detail: '/sirup/penyedia/',
+                  waktuIdx: 4, danaIdx: 5 },
+                { jenis: 'swakelola', endpoint: 'datarupswakelola2018', detail: '/sirup/swakelola/',
+                  waktuIdx: 5, danaIdx: 4 }
+            ];
 
-            // Laporan sebelumnya diam-diam berhenti di 1.000 paket: sisanya hilang
-            // dari realisasi dan selisih terlihat jauh lebih besar dari seharusnya.
-            // Sekarang sisa halaman ditarik sampai habis.
-            const rupTotal = Number(
-                rupRes.iTotalDisplayRecords ?? rupRes.recordsFiltered ??
-                rupRes.iTotalRecords ?? rupRes.recordsTotal ?? rupRows.length
-            ) || rupRows.length;
+            // Penarikan bertahap: laporan pernah diam-diam berhenti di 1.000 paket.
+            async function fetchRupList(src) {
+                const url = `/sirup/datatablectr/${src.endpoint}?tahun=${ctx.tahun}`;
+                const body = (page) =>
+                    `draw=${page + 1}&start=${page * RUP_PAGE_SIZE}&length=${RUP_PAGE_SIZE}${satkerBody}`;
 
-            if (rupTotal > rupRows.length) {
-                log(`Total paket penyedia ${rupTotal.toLocaleString('id-ID')} — menarik sisa halaman...`, 56);
+                const first = await postForm(url, body(0));
+                const rows = first.aaData || [];
+                const total = Number(
+                    first.iTotalDisplayRecords ?? first.recordsFiltered ??
+                    first.iTotalRecords ?? first.recordsTotal ?? rows.length
+                ) || rows.length;
+
                 let page = 1;
-                while (rupRows.length < rupTotal && page < RUP_MAX_PAGES) {
+                while (rows.length < total && page < RUP_MAX_PAGES) {
                     throwIfAborted();
-                    const moreRes = await postForm(
-                        `/sirup/datatablectr/dataruppenyedia2018?tahun=${ctx.tahun}`,
-                        `draw=${page + 1}&start=${page * RUP_PAGE_SIZE}&length=${RUP_PAGE_SIZE}${satkerBody}`
-                    );
-                    const moreRows = moreRes.aaData || [];
-                    if (moreRows.length === 0) break;
-                    rupRows.push(...moreRows);
+                    const more = await postForm(url, body(page));
+                    const mr = more.aaData || [];
+                    if (mr.length === 0) break;
+                    rows.push(...mr);
                     page++;
                 }
-                if (rupRows.length < rupTotal) {
-                    log(`PERINGATAN: baru ${rupRows.length} dari ${rupTotal} paket yang berhasil ditarik. ` +
-                        'Angka realisasi RUP di laporan ini belum lengkap.', null, 'error');
+                if (rows.length < total) {
+                    log(`PERINGATAN: baru ${rows.length} dari ${total} paket ${src.jenis} yang berhasil ` +
+                        'ditarik. Angka realisasi RUP di laporan ini belum lengkap.', null, 'error');
                 }
-            }
-
-            // Paket swakelola belum ikut disandingkan — hitung saja sebagai catatan
-            try {
-                const swaRes = await postForm(`/sirup/datatablectr/datarupswakelola2018?tahun=${ctx.tahun}`, rupBody);
-                const swaRows = swaRes.aaData || [];
-                if (swaRows.length > 0) {
-                    log(`Catatan: ada ${swaRows.length} paket swakelola di RUP. Laporan ini hanya menyanding paket penyedia.`, 57, 'warn');
-                }
-            } catch (swaErr) {
-                console.error("Swakelola fetch error:", swaErr);
-                log('Catatan: daftar paket swakelola tidak bisa diambil (diabaikan).', 57, 'warn');
+                return rows;
             }
 
             const rupPackets = [];
-            for (const row of rupRows) {
-                rupPackets.push({
-                    id: row[0],
-                    keg_name: row[1],
-                    name: row[2],
-                    pagu: parseInt(row[3].toString().replace(/\./g, '')) || 0,
-                    waktu: row[4],
-                    sumber_dana: row[5],
-                    aktif: parseCheckboxValue(row[6]), 
-                    fd: parseCheckboxValue(row[7]), 
-                    umumkan: parseCheckboxValue(row[8]), 
-                    mak: row[13] || ""
-                });
+            const jumlahPerJenis = {};
+
+            for (const src of RUP_SOURCES) {
+                throwIfAborted();
+                let rows = [];
+                try {
+                    rows = await fetchRupList(src);
+                } catch (e) {
+                    console.error(src.jenis, e);
+                    log(`PERINGATAN: daftar paket ${src.jenis} gagal ditarik (${e.message}). ` +
+                        'Realisasi RUP di laporan ini belum mencakup jenis paket tersebut.', null, 'error');
+                    continue;
+                }
+                jumlahPerJenis[src.jenis] = rows.length;
+                for (const row of rows) {
+                    rupPackets.push({
+                        id: row[0],
+                        keg_name: row[1],
+                        name: row[2],
+                        pagu: parseInt(String(row[3]).replace(/\./g, '')) || 0,
+                        waktu: row[src.waktuIdx],
+                        sumber_dana: row[src.danaIdx],
+                        aktif: parseCheckboxValue(row[6]),
+                        fd: parseCheckboxValue(row[7]),
+                        umumkan: parseCheckboxValue(row[8]),
+                        mak: makFromRow(row),
+                        jenis: src.jenis
+                    });
+                }
+                log(`Paket ${src.jenis}: ${rows.length}`, 56);
+            }
+
+            // Swakelola dulu hanya dihitung sebagai catatan dan tidak pernah
+            // disanding. Di satker yang banyak swakelola, itu membuat capaian
+            // terlihat jauh lebih buruk daripada keadaan sebenarnya.
+            const nSwa = jumlahPerJenis.swakelola || 0;
+            if (nSwa > 0) {
+                const swaUmum = rupPackets.filter(p => p.jenis === 'swakelola' &&
+                                                       p.aktif && p.fd && p.umumkan).length;
+                log(`Swakelola ikut disanding: ${nSwa} paket, ${swaUmum} di antaranya berstatus A+FD+U.`,
+                    57, swaUmum === 0 ? 'warn' : null);
+                if (swaUmum === 0) {
+                    log('Catatan: tidak ada paket swakelola yang lolos A+FD+U, jadi tidak ada yang ' +
+                        'masuk realisasi. Periksa kolom A (Aktif) paket swakelola di SiRUP.', null, 'warn');
+                }
             }
             
             log(`Ditemukan ${rupPackets.length} paket. Mengambil detail MAK sub-paket secara concurrent (kecepatan tinggi)...`, 65);
@@ -1070,41 +1215,16 @@
             const rupDetails = {};
             let fetchedCount = 0;
             
+            let strukturTakDikenali = 0;
             const detailResults = await mapConcurrent(rupPackets, 10, async (p) => {
                 throwIfAborted();
-                const detailHtml = await getText(`/sirup/penyedia/${p.id}`);
-                const parser = new DOMParser();
-                const detailDoc = parser.parseFromString(detailHtml, 'text/html');
-                
-                const tables = Array.from(detailDoc.querySelectorAll('table'));
-                let fundingTable = null;
-                for (const t of tables) {
-                    const headerText = t.innerText.toLowerCase();
-                    if (headerText.includes('sumber dana') && headerText.includes('mak') && headerText.includes('pagu')) {
-                        fundingTable = t;
-                        break;
-                    }
-                }
-                
-                const items = [];
-                if (fundingTable) {
-                    const trs = Array.from(fundingTable.querySelectorAll('tr'));
-                    for (let i = 1; i < trs.length; i++) {
-                        const tr = trs[i];
-                        const tds = Array.from(tr.querySelectorAll('td'));
-                        if (tds.length < 6) continue;
-                        
-                        const noText = tds[0].innerText.trim();
-                        if (!/^\d+\.?$/.test(noText)) continue;
-                        
-                        const mak = tds[4].innerText.trim();
-                        const paguText = tds[5].innerText.trim().replace(/Rp\./g, '').replace(/\./g, '').trim();
-                        const pagu = parseInt(paguText) || 0;
-                        
-                        items.push({ mak, pagu });
-                    }
-                }
-                rupDetails[p.id] = items;
+                const src = RUP_SOURCES.find(x => x.jenis === p.jenis) || RUP_SOURCES[0];
+                const detailHtml = await getText(`${src.detail}${p.id}`);
+                const detailDoc = new DOMParser().parseFromString(detailHtml, 'text/html');
+
+                const parsed = parseFundingTable(detailDoc);
+                if (parsed === null) strukturTakDikenali++;
+                rupDetails[p.id] = parsed || [];
                 
                 fetchedCount++;
                 if (fetchedCount % 5 === 0 || fetchedCount === rupPackets.length) {
@@ -1116,12 +1236,73 @@
             // tidak ikut dibangun.
             throwIfAborted();
 
+            // Kalau SiRUP mengubah judul kolom, SEMUA paket menghasilkan nol baris
+            // MAK dan laporan terbit 0% tanpa satu pun error. Itu harus berbunyi.
+            if (strukturTakDikenali > 0) {
+                const pct = Math.round(strukturTakDikenali / Math.max(1, rupPackets.length) * 100);
+                log(`PERINGATAN: tabel pendanaan tidak dikenali pada ${strukturTakDikenali} dari ` +
+                    `${rupPackets.length} paket (${pct}%). Kalau angkanya besar, kemungkinan ` +
+                    'struktur halaman SiRUP berubah dan laporan ini tidak bisa dipakai.',
+                    null, 'error');
+            }
+
             const detailFailures = (detailResults && detailResults.failures) || [];
             if (detailFailures.length > 0) {
                 log('PERINGATAN: detail ' + detailFailures.length + ' dari ' + rupPackets.length +
                     ' paket gagal ditarik. Pagu paket tersebut TIDAK masuk hitungan ' +
                     'realisasi — ulangi ekspor sebelum laporan ini dipakai untuk monev.',
                     null, 'error');
+            }
+
+            // Awalan MAK memuat tahun & kode satker pemilik pagu. Ini satu-satunya
+            // sumber yang bisa memastikan paket yang ditarik memang milik satker dan
+            // tahun yang sedang diekspor — parameter idSatker yang dikirim ke SiRUP
+            // hanya tebakan dan bisa saja diabaikan server.
+            {
+                const tahunMak = new Map(), satkerMak = new Map();
+                for (const p of rupPackets) {
+                    const pre = makPrefix(p.mak);
+                    if (!pre) continue;
+                    tahunMak.set(pre.tahun, (tahunMak.get(pre.tahun) || 0) + 1);
+                    satkerMak.set(pre.satker, (satkerMak.get(pre.satker) || 0) + 1);
+                }
+                const bedaTahun = Array.from(tahunMak.keys()).filter(t => t !== String(ctx.tahun));
+                if (bedaTahun.length > 0) {
+                    const n = bedaTahun.reduce((t, k) => t + tahunMak.get(k), 0);
+                    log(`PERINGATAN: ${n} paket ber-MAK tahun ${bedaTahun.join(', ')}, ` +
+                        `bukan TA ${ctx.tahun} yang sedang diekspor.`, null, 'error');
+                }
+                if (satkerMak.size > 1) {
+                    const urut = Array.from(satkerMak.entries()).sort((a, b) => b[1] - a[1]);
+                    const utama = urut[0][0];
+                    const lain = urut.slice(1);
+                    log(`PERINGATAN: paket berasal dari ${satkerMak.size} kode satker berbeda ` +
+                        `(terbanyak ${utama}; lainnya ${lain.map(([k, n]) => `${k}:${n} paket`).join(', ')}). ` +
+                        'Pastikan satker aktif di SiRUP sudah benar sebelum laporan ini dipakai.',
+                        null, 'error');
+                }
+                if (satkerMak.size === 1 && ctx.satkerName) {
+                    log(`Kode satker pada MAK: ${Array.from(satkerMak.keys())[0]} ` +
+                        `(nama di kop diisi manual: "${ctx.satkerName}").`, null, null);
+                }
+            }
+
+            // Paket kembar: nama, MAK, dan pagu sama persis. Biasanya salah entri
+            // ganda, dan kembarannya akan muncul sebagai kelebihan di sheet Detail.
+            {
+                const kunci = new Map();
+                for (const p of rupPackets) {
+                    const k = `${p.jenis}|${p.name}|${p.mak}|${p.pagu}`;
+                    kunci.set(k, (kunci.get(k) || 0) + 1);
+                }
+                const kembar = Array.from(kunci.values()).filter(n => n > 1);
+                if (kembar.length > 0) {
+                    const total = kembar.reduce((t, n) => t + (n - 1), 0);
+                    log(`PERINGATAN: ada ${kembar.length} kelompok paket kembar ` +
+                        `(nama, MAK, dan pagu sama persis) — ${total} paket berlebih. ` +
+                        'Kemungkinan entri ganda; pagunya ikut terhitung dua kali di RUP.',
+                        null, 'error');
+                }
             }
 
             log('Pemuatan data RKA & RUP selesai! Memproses penyandingan...', 85);
@@ -1326,9 +1507,13 @@
                                 if (r.level === 0) {
                                     komp_np = r.np_ch;
                                     komp_gj = r.gj_ch;
+                                    // induk berganti -> warisan di bawahnya dilepas
+                                    subkomp_np = false; subkomp_gj = false;
+                                    akun_np = false; akun_gj = false;
                                 } else if (r.level === 1) {
                                     subkomp_np = r.np_ch;
                                     subkomp_gj = r.gj_ch;
+                                    akun_np = false; akun_gj = false;
                                 } else if (r.level === 2) {
                                     akun_np = r.np_ch;
                                     akun_gj = r.gj_ch;
@@ -1370,8 +1555,11 @@
                             for (const r of komp.rows || []) {
                                 if (r.level === 0) {
                                     komp_np = r.np_ch; komp_gj = r.gj_ch;
+                                    subkomp_np = false; subkomp_gj = false;
+                                    akun_np = false; akun_gj = false;
                                 } else if (r.level === 1) {
                                     subkomp_np = r.np_ch; subkomp_gj = r.gj_ch;
+                                    akun_np = false; akun_gj = false;
                                 } else if (r.level === 2) {
                                     akun_np = r.np_ch; akun_gj = r.gj_ch;
                                 } else if (r.level === 3) {
@@ -2035,9 +2223,13 @@
                                 if (r.level === 0) {
                                     komp_np = r.np_ch;
                                     komp_gj = r.gj_ch;
+                                    // induk berganti -> warisan di bawahnya dilepas
+                                    subkomp_np = false; subkomp_gj = false;
+                                    akun_np = false; akun_gj = false;
                                 } else if (r.level === 1) {
                                     subkomp_np = r.np_ch;
                                     subkomp_gj = r.gj_ch;
+                                    akun_np = false; akun_gj = false;
                                 } else if (r.level === 2) {
                                     akun_np = r.np_ch;
                                     akun_gj = r.gj_ch;
@@ -2374,9 +2566,13 @@
                                 if (r.level === 0) {
                                     komp_np = r.np_ch;
                                     komp_gj = r.gj_ch;
+                                    // induk berganti -> warisan di bawahnya dilepas
+                                    subkomp_np = false; subkomp_gj = false;
+                                    akun_np = false; akun_gj = false;
                                 } else if (r.level === 1) {
                                     subkomp_np = r.np_ch;
                                     subkomp_gj = r.gj_ch;
+                                    akun_np = false; akun_gj = false;
                                 } else if (r.level === 2) {
                                     akun_np = r.np_ch;
                                     akun_gj = r.gj_ch;
@@ -2429,6 +2625,7 @@
                             const detail_row_objects = [];
                             const np_by_key = new Map();      // akun bertanda NP/Gaji
                             const revisi_by_key = new Map();  // jejak revisi per akun
+                            const my_by_key = new Set();      // akun bertanda tahun jamak
                             let curr_subkomp = "";
                             let curr_akun = "";
                             for (let r_idx = 0; r_idx < komp_rows.length; r_idx++) {
@@ -2449,6 +2646,7 @@
                                     if (!revisi_by_key.has(rkey)) {
                                         revisi_by_key.set(rkey, { berubah: false, baru: false, prev: 0 });
                                     }
+                                    if (r.my_ch) my_by_key.add(rkey);
                                     const rv = revisi_by_key.get(rkey);
                                     const pg = typeof r.pagu === 'number' ? r.pagu : 0;
                                     if (typeof r.paguPrev === 'number') {
@@ -2687,8 +2885,14 @@
                                 excess_written.add(key);
                                 const kind = e.kind || 'over';
 
+                                // Paket tahun jamak wajar melebihi pagu satu tahun —
+                                // jangan dituduh anomali tanpa catatan.
+                                const myNote = (kind === 'over' && my_by_key.has(key))
+                                    ? '  Catatan: baris di akun ini bertanda TAHUN JAMAK (MY), ' +
+                                      'jadi pagu paket yang melampaui pagu satu tahun bisa jadi wajar.'
+                                    : '';
                                 ws.getCell(curr_row, 6).value =
-                                    (EXCESS_TEXT[kind] || EXCESS_TEXT.over) + revisiNote(key);
+                                    (EXCESS_TEXT[kind] || EXCESS_TEXT.over) + revisiNote(key) + myNote;
                                 ws.getCell(curr_row, 15).value = e.ids.join(", ");
                                 ws.getCell(curr_row, 16).value = e.names.join(", ");
                                 ws.getCell(curr_row, 17).value = e.total;
