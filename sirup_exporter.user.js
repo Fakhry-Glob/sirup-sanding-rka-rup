@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.3
 // @description  Crawl RKA dan RUP dari SiRUP, lalu ekspor jadi laporan sanding Excel (dashboard, ringkasan, sanding berjenjang, detail per program). Tahun anggaran & satker terdeteksi otomatis.
 // @author       Fakhry-Glob
 // @match        https://sirup.inaproc.id/sirup/*
@@ -17,7 +17,7 @@
 
     // ═════════════════════════════════════════════════════════ KONFIGURASI ══
     const APP_TITLE = 'Sanding RKA & RUP';
-    const APP_VERSION = '3.2';
+    const APP_VERSION = '3.3';
 
     // Konteks runtime: diisi otomatis oleh detectContext(), bisa dikoreksi
     // pengguna lewat panel pra-ekspor sebelum crawling dimulai.
@@ -1762,15 +1762,37 @@
         for (let c = 1; c <= 8; c++) ws_dash.getCell(stat_head_row, c).border = border_thin;
         ws_dash.getRow(stat_head_row).height = 22;
 
+        let barisTidakTertampung = 0;
         const pkt_sah = rupPackets.filter(p => p.aktif && p.fd && p.umumkan).length;
         const pkt_draft = rupPackets.length - pkt_sah;
+        const n_penyedia = rupPackets.filter(p => p.jenis !== 'swakelola').length;
+        const n_swakelola = rupPackets.filter(p => p.jenis === 'swakelola').length;
+        const selisih_CD = total_target_pengadaan - total_rup_pagu;
+
+        // Kalau D > C, selisihnya negatif dan bukan "belum diumumkan" — justru
+        // sebaliknya, ada RUP yang tidak punya tempat di RKA. Labelnya ikut.
+        const label_selisih = selisih_CD >= 0
+            ? "Selisih pengadaan yang belum diumumkan (C − D)"
+            : "RUP MELEBIHI target pengadaan (D − C) — ada pagu RUP tanpa tempat di RKA";
+        const nilai_selisih = selisih_CD >= 0 ? selisih_CD : -selisih_CD;
+
         const stats_data = [
             ["Total belanja non-pengadaan (NP / Gaji satker) — komponen B", total_non_pengadaan, "Rupiah", false],
-            ["Selisih pengadaan yang belum diumumkan (C − D)", total_target_pengadaan - total_rup_pagu, "Rupiah", (total_target_pengadaan - total_rup_pagu) > 0],
-            ["Jumlah paket RUP terdaftar (penyedia)", rupPackets.length, "Paket", false],
+            [label_selisih, nilai_selisih, "Rupiah", selisih_CD !== 0],
+            [n_swakelola > 0
+                ? `Jumlah paket RUP terdaftar (${n_penyedia} penyedia + ${n_swakelola} swakelola)`
+                : "Jumlah paket RUP terdaftar (penyedia)",
+                rupPackets.length, "Paket", false],
             ["Jumlah paket RUP sah (terumumkan KPA)", pkt_sah, "Paket", false],
             ["Jumlah paket RUP belum terumumkan (draft / dibatalkan)", pkt_draft, "Paket", pkt_draft > 0],
-            ["Jumlah paket RUP tanpa sandingan RKA (potensi salah input MAK)", unique_unmatched_count, "Paket", unique_unmatched_count > 0]
+            // Dua hitungan berbeda yang dulu gampang tertukar: yang satu soal MAK
+            // yang tidak ketemu, yang satu soal uang yang tidak tertampung. Paket
+            // ber-MAK benar tapi akunnya sudah penuh masuk yang kedua, bukan pertama.
+            ["Jumlah paket ber-MAK yang tidak ada di RKA (potensi salah input MAK)",
+                unique_unmatched_count, "Paket", unique_unmatched_count > 0],
+            ["Jumlah paket yang pagunya tidak tertampung — seluruh/sebagian " +
+             "(lihat kolom Status Sanding di sheet Daftar Paket RUP)",
+                "__TIDAK_TERTAMPUNG__", "Paket", true]
         ];
 
         stats_data.forEach((row, i) => {
@@ -1784,7 +1806,10 @@
             label.alignment = { horizontal: 'left', vertical: 'middle', indent: 1, wrapText: true };
 
             const val = ws_dash.getCell(`D${r}`);
-            val.value = row[1];
+            // Hitungan ini baru diketahui setelah sheet Detail dibangun; barisnya
+            // dicatat dulu, nilainya diisi pada pass kedua di akhir.
+            if (row[1] === "__TIDAK_TERTAMPUNG__") { barisTidakTertampung = r; val.value = null; }
+            else val.value = row[1];
             val.numFmt = row[2] === "Rupiah" ? FMT_RP : '#,##0';
             val.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
 
@@ -2731,15 +2756,55 @@
                             // 377.999.808 dan kolom Selisih-nya tidak berarti apa-apa.
                             const excess_by_key = new Map();
 
+                            // Kalau beberapa paket menunjuk MAK yang sama dan jumlah
+                            // pagunya melebihi ruang yang tersedia, kekurangannya dipikul
+                            // BERSAMA sebanding pagu masing-masing. Tanpa ini, paket yang
+                            // kebetulan diproses lebih dulu mengambil seluruh sisa ruang
+                            // dan paket berikutnya tampil 0% — padahal datanya tidak
+                            // memberi alasan apa pun untuk mengurutkan mereka begitu.
+                            function bagiProporsional(rows, pools) {
+                                const aktif = pools.filter(p => p.remaining_pagu > 0);
+                                if (aktif.length === 0) return;
+
+                                const kapasitas = rows.reduce(
+                                    (t, d) => t + Math.max(0, d.pagu - d.allocated_pagu), 0);
+                                const permintaan = aktif.reduce((t, p) => t + p.remaining_pagu, 0);
+
+                                if (permintaan <= kapasitas) {
+                                    aktif.forEach(p => { p.budget = p.remaining_pagu; });
+                                    return;
+                                }
+
+                                let terbagi = 0;
+                                aktif.forEach(p => {
+                                    p.budget = Math.floor(p.remaining_pagu * kapasitas / permintaan);
+                                    terbagi += p.budget;
+                                });
+                                // Sisa pembulatan diberikan ke paket terbesar dulu, supaya
+                                // baris RKA tetap terisi persis sampai pagunya.
+                                let sisa = kapasitas - terbagi;
+                                for (const p of aktif.slice().sort((a, b) => b.remaining_pagu - a.remaining_pagu)) {
+                                    if (sisa <= 0) break;
+                                    const tambah = Math.min(sisa, p.remaining_pagu - p.budget);
+                                    p.budget += tambah;
+                                    sisa -= tambah;
+                                }
+                            }
+
                             function fillRows(rows, pools, crossAkun) {
+                                bagiProporsional(rows, pools);
                                 for (const d_obj of rows) {
                                     let needed = d_obj.pagu - d_obj.allocated_pagu;
                                     if (needed <= 0) continue;
                                     for (const pool of pools) {
                                         if (needed <= 0) break;
                                         if (pool.remaining_pagu <= 0) continue;
-                                        const amount = Math.min(needed, pool.remaining_pagu);
+                                        const jatah = pool.budget == null ? pool.remaining_pagu : pool.budget;
+                                        if (jatah <= 0) continue;
+                                        const amount = Math.min(needed, pool.remaining_pagu, jatah);
+                                        if (amount <= 0) continue;
                                         pool.remaining_pagu -= amount;
+                                        if (pool.budget != null) pool.budget -= amount;
                                         d_obj.allocated_pagu += amount;
                                         needed -= amount;
                                         ledger(pool.packet_id).alokasi += amount;
@@ -2753,6 +2818,7 @@
                                         if (crossAkun) d_obj.cross_akun = true;
                                     }
                                 }
+                                pools.forEach(p => { p.budget = null; });
                             }
 
                             // Tahap 1 — cocok persis 7 ruas (MAK paket = MAK baris RKA).
@@ -3207,6 +3273,21 @@
         // Menjawab langsung: paket ini tidak sinkron seluruhnya, atau cuma
         // sebagiannya? Satu paket bisa punya beberapa baris MAK, dan satu baris
         // MAK pun bisa terbelah antara yang terserap dan yang tidak.
+        if (barisTidakTertampung) {
+            let n = 0;
+            barisPaket.forEach((info, id) => {
+                const lg = paketLedger.get(id);
+                if (info.sah && lg && lg.kelebihan > 0) n++;
+            });
+            const c = ws_dash.getCell(`D${barisTidakTertampung}`);
+            c.value = n;
+            c.numFmt = '#,##0';
+            if (n > 0) {
+                c.font = { name: FONT, size: 9.5, bold: true, color: { argb: 'FFC00000' } };
+                c.fill = solid(LIGHT_ORANGE);
+            }
+        }
+
         barisPaket.forEach((info, id) => {
             const lg = paketLedger.get(id) || { alokasi: 0, kelebihan: 0 };
             let teks, warna, tinta;

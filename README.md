@@ -142,6 +142,18 @@ Kolom *Pagu RUP Terumumkan* sengaja **tidak** digabung: dengan nominal per baris
 kolom itu tetap bisa dijumlah dan difilter, dan tiap baris paket jadi bermakna
 sendiri.
 
+**Kalau permintaan melebihi ruang, kekurangannya dipikul bersama.** Saat
+beberapa paket menunjuk MAK yang sama dan jumlah pagunya melampaui baris RKA
+yang tersedia, jatah tiap paket dihitung **sebanding pagunya** — bukan paket
+yang kebetulan diproses lebih dulu yang mengambil seluruh sisa ruang. Contoh:
+kapasitas 60 juta diperebutkan paket 12 / 18 / 7 / 30 juta (total 67 juta),
+hasilnya keempatnya tersanding 90%, bukan tiga penuh dan satu nol.
+
+Akibatnya, pada akun yang kelebihan muatan **semua paket di akun itu berstatus
+SEBAGIAN**, bukan sebagian penuh dan sebagian nol. Itu lebih jujur: kalau
+akunnya kelebihan 31%, tidak ada paket di situ yang benar-benar tertampung
+seluruhnya. Total tersanding dan total kelebihan tidak berubah.
+
 **Sebuah baris tidak pernah menerima lebih dari pagunya.** Sampai v2.3 seluruh
 sisa paket ditumpahkan ke baris pertama tiap akun, sehingga baris berpagu
 45.500.000 bisa tampil 45.500.000 → 377.999.808 dan kolom Selisih-nya tidak
