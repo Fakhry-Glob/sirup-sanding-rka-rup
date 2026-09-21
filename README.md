@@ -39,7 +39,7 @@ yang disimpan atau dikirim ke mana pun.
 | **Dashboard Evaluasi** | Kartu KPI (pagu satker, non-pengadaan, target pengadaan, RUP terumumkan), capaian, statistik paket, kontrol silang total RUP, 10 komponen dengan selisih terbesar, legenda warna |
 | **Ringkasan Pagu** | Daftar seluruh komponen RKA beserta pagunya |
 | **Sanding RKA & RUP** | Inti laporan: per komponen — pagu RKA, non-pengadaan, target pengadaan, RUP terumumkan, selisih, capaian, status. Lengkap dengan subtotal RO → KRO → Kegiatan → Program |
-| **Daftar Paket RUP** | Semua paket penyedia beserta status A / FD / U dan komponen RKA yang tersanding |
+| **Daftar Paket RUP** | Semua paket penyedia & swakelola beserta status A / FD / U, komponen RKA tersanding, dan **Status Sanding** per paket (penuh / sebagian berapa persen / tidak sama sekali) lengkap dengan nilai yang tertampung dan yang tidak |
 | **Paket RUP Tanpa Sandingan** | Paket yang MAK-nya tidak ketemu di RKA — biasanya salah input atau anggaran sudah dihapus |
 | **Detail – \<kode program\>** | Rincian RKA sampai level detail, disandingkan baris per baris dengan paket RUP-nya |
 
@@ -119,6 +119,22 @@ RKA, jadi kalau pagu di akun itu memang berubah, barisnya menambahkan:
 atau, untuk baris yang belum ada sebelum revisi, *"baris di akun ini BARU muncul
 setelah revisi"*. Kalau tidak ada jejak revisi, catatan ini tidak dimunculkan —
 daripada menebak.
+
+### Seluruhnya atau sebagian?
+
+Ketidaksinkronan jarang bersifat "paket ini salah". Ada tiga tingkat, dan
+laporan menyebut ketiganya:
+
+- **Paket** bisa punya beberapa baris MAK — sebagian cocok, sebagian tidak.
+- **Satu baris MAK** pun bisa terbelah: sebagian terserap baris RKA, sisanya
+  tidak tertampung.
+- **Akun** bisa kelebihan muatan karena beberapa paket menunjuk MAK yang sama.
+
+Karena itu sheet *Daftar Paket RUP* punya kolom **Status Sanding** per paket:
+*Tersanding penuh* / *Tersanding SEBAGIAN — 77% (n baris MAK)* / *Tidak
+tersanding sama sekali*, ditambah kolom nilai yang tertampung dan yang tidak.
+Baris kelebihan di sheet Detail juga merinci nominal **per paket**, bukan satu
+angka gabungan untuk beberapa ID sekaligus.
 
 **Sebuah baris tidak pernah menerima lebih dari pagunya.** Sampai v2.3 seluruh
 sisa paket ditumpahkan ke baris pertama tiap akun, sehingga baris berpagu
@@ -236,6 +252,7 @@ Tiap jenis temuan punya sakelarnya sendiri, bisa digabung:
 | `?kembar=1` | Dua paket identik (nama, MAK, pagu sama persis) |
 | `?bentrok=1` | Dua komponen berkode sama di bawah satu RO |
 | `?tahunbeda=1` | RKA sesi TA 2025 sementara panel TA 2026 — ekspor harus berhenti |
+| `?sebagian=1` | Satu paket yang hanya sebagian pagunya tertampung |
 
 Baris *Pagu A* sengaja dibuat berubah saat revisi (25.000.000 → 30.000.000)
 supaya catatan bukti revisi ikut teruji.

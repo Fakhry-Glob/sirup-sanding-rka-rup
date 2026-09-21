@@ -41,7 +41,9 @@ const PACKETS = [
   { id: 'A1', name: 'Paket A1', pagu: 12000000, mak: MAK_AB },
   { id: 'A2', name: 'Paket A2', pagu: 18000000, mak: MAK_AB },
   { id: 'B1', name: 'Paket B1', pagu:  7000000, mak: MAK_AB },
-  { id: 'B2', name: 'Paket B2', pagu: 23000000, mak: MAK_AB },
+  // ?sebagian=1 -> B2 jadi 30jt: 23jt terserap (13 di Pagu B + 10 di Pagu C),
+  // sisa 7jt tidak tertampung -> paket ini TERSANDING SEBAGIAN
+  { id: 'B2', name: 'Paket B2', pagu: Q.has('sebagian') ? 30000000 : 23000000, mak: MAK_AB },
 ];
 if (WITH_EXCESS) PACKETS.push({ id: 'X1', name: 'Paket Kelebihan',        pagu: 5000000, mak: MAK_AB });
 if (WITH_NP)     PACKETS.push({ id: 'N1', name: 'Paket atas pagu NP',     pagu: 4000000, mak: MAK_NP });

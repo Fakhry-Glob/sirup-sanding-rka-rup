@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.1
 // @description  Crawl RKA dan RUP dari SiRUP, lalu ekspor jadi laporan sanding Excel (dashboard, ringkasan, sanding berjenjang, detail per program). Tahun anggaran & satker terdeteksi otomatis.
 // @author       Fakhry-Glob
 // @match        https://sirup.inaproc.id/sirup/*
@@ -17,7 +17,7 @@
 
     // ═════════════════════════════════════════════════════════ KONFIGURASI ══
     const APP_TITLE = 'Sanding RKA & RUP';
-    const APP_VERSION = '3.0';
+    const APP_VERSION = '3.1';
 
     // Konteks runtime: diisi otomatis oleh detectContext(), bisa dikoreksi
     // pengguna lewat panel pra-ekspor sebelum crawling dimulai.
@@ -1482,6 +1482,16 @@
             }
         }
 
+        // Satu paket bisa punya beberapa baris MAK, dan satu baris MAK bisa
+        // terbelah: sebagian terserap baris RKA, sisanya jadi kelebihan. Tanpa
+        // buku besar per paket, laporan tidak bisa menjawab pertanyaan paling
+        // dasar — paket ini tidak sinkron seluruhnya, atau cuma sebagiannya?
+        const paketLedger = new Map();   // id paket -> { alokasi, kelebihan }
+        function ledger(id) {
+            if (!paketLedger.has(id)) paketLedger.set(id, { alokasi: 0, kelebihan: 0 });
+            return paketLedger.get(id);
+        }
+
         // --- 0. PRE-CALCULATE ALL TOTALS & STATS ---
         let total_satker_pagu = 0;
         let total_non_pengadaan = 0;
@@ -2361,18 +2371,20 @@
 
 
         // ----------------- SHEET 3: DAFTAR PAKET RUP -----------------
+        const barisPaket = new Map();   // id paket -> baris di sheet Daftar Paket RUP
         const ws_rup = wb.addWorksheet("Daftar Paket RUP");
 
-        writeTitle(ws_rup, "DAFTAR PAKET PENYEDIA DI RUP", "M");
+        writeTitle(ws_rup, "DAFTAR PAKET RUP (PENYEDIA & SWAKELOLA)", "Q");
 
         const headers_rup = [
             "No", "ID Paket", "Nama Kegiatan (RUP)", "Nama Paket", "Pagu RUP",
             "Waktu Pemilihan", "Sumber Dana", "A", "FD", "U", "Status Paket",
-            "Kode Otorisasi (MAK)", "Komponen RKA Tersanding"
+            "Kode Otorisasi (MAK)", "Komponen RKA Tersanding",
+            "Jenis", "Status Sanding", "Nilai Tersanding", "Tidak Tertampung"
         ];
 
         writeHeader(ws_rup, 4, headers_rup,
-            [6, 12, 28, 40, 16, 16, 13, 6, 6, 6, 20, 30, 26]);
+            [6, 12, 28, 40, 16, 16, 13, 6, 6, 6, 20, 30, 26, 11, 26, 16, 16]);
         ws_rup.getCell(4, 8).note = "A = Draft PPK";
         ws_rup.getCell(4, 9).note = "FD = Final Draft PPK";
         ws_rup.getCell(4, 10).note = "U = Sudah diumumkan KPA";
@@ -2401,7 +2413,12 @@
             const p_comp_keys = Array.from(new Set(rup_all_lines.filter(l => l.packet_id === p.id).map(l => l.comp_key)));
             ws_rup.getCell(row_idx, 13).value = p_comp_keys.join(", ");
 
-            for (let col_c = 1; col_c <= 13; col_c++) {
+            ws_rup.getCell(row_idx, 14).value = p.jenis === 'swakelola' ? 'Swakelola' : 'Penyedia';
+            // Kolom 15-17 (status sanding) baru bisa diisi setelah sheet Detail
+            // dibangun, karena alokasinya terjadi di sana. Barisnya dicatat dulu.
+            barisPaket.set(p.id, { row: row_idx, sah, nLines: rup_all_lines.filter(l => l.packet_id === p.id).length });
+
+            for (let col_c = 1; col_c <= 17; col_c++) {
                 const cell = ws_rup.getCell(row_idx, col_c);
                 cell.border = border_thin;
                 cell.font = { name: FONT, size: 9, color: { argb: sah ? INK : INK_SOFT } };
@@ -2436,7 +2453,7 @@
         ws_rup.getCell(row_idx, 5).numFmt = FMT_RP;
         ws_rup.getRow(row_idx).height = 20;
 
-        finishSheet(ws_rup, { headerRow: 4, lastRow: rup_last_row - 1, lastCol: 13, tabColor: 'FF375623' });
+        finishSheet(ws_rup, { headerRow: 4, lastRow: rup_last_row - 1, lastCol: 17, tabColor: 'FF375623' });
 
 
         // ----------------- SHEET 3A: PAKET RUP TANPA SANDINGAN -----------------
@@ -2725,6 +2742,7 @@
                                         pool.remaining_pagu -= amount;
                                         d_obj.allocated_pagu += amount;
                                         needed -= amount;
+                                        ledger(pool.packet_id).alokasi += amount;
                                         // id & nama didorong berpasangan; kalau dicek
                                         // terpisah, dua paket bernama sama membuat kedua
                                         // daftar itu tidak lagi sejajar.
@@ -2752,17 +2770,20 @@
 
                             function recordExcess(pool, kind) {
                                 if (!excess_by_key.has(pool.key)) {
-                                    excess_by_key.set(pool.key, { total: 0, ids: [], names: [], kind });
+                                    excess_by_key.set(pool.key, { total: 0, entries: [], kind });
                                 }
                                 const e = excess_by_key.get(pool.key);
                                 // Konflik NP adalah temuan paling keras; jangan sampai
                                 // tertutup label lain kalau satu akun kena beberapa sebab.
                                 if (kind === 'np') e.kind = 'np';
                                 e.total += pool.remaining_pagu;
-                                if (!e.ids.includes(pool.packet_id)) {
-                                    e.ids.push(pool.packet_id);
-                                    e.names.push(pool.packet_name);
-                                }
+                                // Dirinci per paket: satu baris kelebihan yang memuat tiga
+                                // ID tanpa nominal masing-masing tidak bisa ditindaklanjuti.
+                                const ada = e.entries.find(x => x.id === pool.packet_id);
+                                if (ada) ada.jumlah += pool.remaining_pagu;
+                                else e.entries.push({ id: pool.packet_id, nama: pool.packet_name,
+                                                      jumlah: pool.remaining_pagu });
+                                ledger(pool.packet_id).kelebihan += pool.remaining_pagu;
                                 pool.remaining_pagu = 0;
                             }
 
@@ -2893,8 +2914,11 @@
                                     : '';
                                 ws.getCell(curr_row, 6).value =
                                     (EXCESS_TEXT[kind] || EXCESS_TEXT.over) + revisiNote(key) + myNote;
-                                ws.getCell(curr_row, 15).value = e.ids.join(", ");
-                                ws.getCell(curr_row, 16).value = e.names.join(", ");
+                                const urut = e.entries.slice().sort((a, b) => b.jumlah - a.jumlah);
+                                ws.getCell(curr_row, 15).value = urut.map(x => x.id).join(", ");
+                                ws.getCell(curr_row, 16).value = urut
+                                    .map(x => `${x.nama} — Rp ${x.jumlah.toLocaleString('id-ID')}`)
+                                    .join('; ');
                                 ws.getCell(curr_row, 17).value = e.total;
                                 ws.getCell(curr_row, 17).numFmt = '#,##0';
                                 ws.getCell(curr_row, 18).value = -e.total;
@@ -3159,6 +3183,49 @@
                 lastRow: curr_row - 1, lastCol: 19, tabColor: MID_BLUE
             });
         }
+
+        // --- STATUS SANDING PER PAKET (pass kedua) ---
+        // Menjawab langsung: paket ini tidak sinkron seluruhnya, atau cuma
+        // sebagiannya? Satu paket bisa punya beberapa baris MAK, dan satu baris
+        // MAK pun bisa terbelah antara yang terserap dan yang tidak.
+        barisPaket.forEach((info, id) => {
+            const lg = paketLedger.get(id) || { alokasi: 0, kelebihan: 0 };
+            let teks, warna, tinta;
+            if (!info.sah) {
+                teks = 'Tidak dihitung (belum A+FD+U)';
+                warna = LIGHT_ORANGE; tinta = 'FFB45309';
+            } else if (info.nLines === 0) {
+                teks = 'MAK tidak terbaca';
+                warna = LIGHT_RED; tinta = 'FFB91C1C';
+            } else if (lg.alokasi > 0 && lg.kelebihan <= 0) {
+                teks = `Tersanding penuh (${info.nLines} baris MAK)`;
+                warna = LIGHT_GREEN; tinta = 'FF166534';
+            } else if (lg.alokasi > 0) {
+                const pct = Math.round(lg.alokasi / (lg.alokasi + lg.kelebihan) * 100);
+                teks = `Tersanding SEBAGIAN — ${pct}% (${info.nLines} baris MAK)`;
+                warna = LIGHT_ORANGE; tinta = 'FFB45309';
+            } else {
+                teks = `Tidak tersanding sama sekali (${info.nLines} baris MAK)`;
+                warna = LIGHT_RED; tinta = 'FFB91C1C';
+            }
+
+            const ss = ws_rup.getCell(info.row, 15);
+            ss.value = teks;
+            ss.fill = solid(warna);
+            ss.font = { name: FONT, size: 9, bold: true, color: { argb: tinta } };
+            ss.alignment = { horizontal: 'left', vertical: 'middle', indent: 1, wrapText: true };
+            ss.border = border_thin;
+
+            for (const [col, val] of [[16, lg.alokasi], [17, lg.kelebihan]]) {
+                const c = ws_rup.getCell(info.row, col);
+                c.value = val;
+                c.numFmt = FMT_RP;
+                c.alignment = { horizontal: 'right', vertical: 'middle', indent: 1 };
+                c.border = border_thin;
+                c.font = { name: FONT, size: 9,
+                           color: { argb: col === 17 && val > 0 ? 'FFB91C1C' : INK } };
+            }
+        });
 
         // Save file
         const safeSatker = (ctx.satkerName || 'Satker')
