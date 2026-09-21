@@ -133,8 +133,14 @@ laporan menyebut ketiganya:
 Karena itu sheet *Daftar Paket RUP* punya kolom **Status Sanding** per paket:
 *Tersanding penuh* / *Tersanding SEBAGIAN — 77% (n baris MAK)* / *Tidak
 tersanding sama sekali*, ditambah kolom nilai yang tertampung dan yang tidak.
-Baris kelebihan di sheet Detail juga merinci nominal **per paket**, bukan satu
-angka gabungan untuk beberapa ID sekaligus.
+Baris kelebihan di sheet Detail ditulis **satu baris per paket**, masing-masing
+dengan ID, nama, dan nominalnya sendiri. Kolom keterangan digabung menaungi
+seluruh baris paket, karena alasannya satu untuk seluruh blok. Sebelumnya semua
+paket ditumpuk ke satu sel dan enam paket membuat barisnya setinggi layar.
+
+Kolom *Pagu RUP Terumumkan* sengaja **tidak** digabung: dengan nominal per baris,
+kolom itu tetap bisa dijumlah dan difilter, dan tiap baris paket jadi bermakna
+sendiri.
 
 **Sebuah baris tidak pernah menerima lebih dari pagunya.** Sampai v2.3 seluruh
 sisa paket ditumpahkan ke baris pertama tiap akun, sehingga baris berpagu

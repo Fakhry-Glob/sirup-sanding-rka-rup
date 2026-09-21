@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      3.1
+// @version      3.2
 // @description  Crawl RKA dan RUP dari SiRUP, lalu ekspor jadi laporan sanding Excel (dashboard, ringkasan, sanding berjenjang, detail per program). Tahun anggaran & satker terdeteksi otomatis.
 // @author       Fakhry-Glob
 // @match        https://sirup.inaproc.id/sirup/*
@@ -17,7 +17,7 @@
 
     // ═════════════════════════════════════════════════════════ KONFIGURASI ══
     const APP_TITLE = 'Sanding RKA & RUP';
-    const APP_VERSION = '3.1';
+    const APP_VERSION = '3.2';
 
     // Konteks runtime: diisi otomatis oleh detectContext(), bisa dikoreksi
     // pengguna lewat panel pra-ekspor sebelum crawling dimulai.
@@ -2912,38 +2912,57 @@
                                     ? '  Catatan: baris di akun ini bertanda TAHUN JAMAK (MY), ' +
                                       'jadi pagu paket yang melampaui pagu satu tahun bisa jadi wajar.'
                                     : '';
-                                ws.getCell(curr_row, 6).value =
-                                    (EXCESS_TEXT[kind] || EXCESS_TEXT.over) + revisiNote(key) + myNote;
-                                const urut = e.entries.slice().sort((a, b) => b.jumlah - a.jumlah);
-                                ws.getCell(curr_row, 15).value = urut.map(x => x.id).join(", ");
-                                ws.getCell(curr_row, 16).value = urut
-                                    .map(x => `${x.nama} — Rp ${x.jumlah.toLocaleString('id-ID')}`)
-                                    .join('; ');
-                                ws.getCell(curr_row, 17).value = e.total;
-                                ws.getCell(curr_row, 17).numFmt = '#,##0';
-                                ws.getCell(curr_row, 18).value = -e.total;
-                                ws.getCell(curr_row, 18).numFmt = '#,##0';
 
-                                // Konflik NP dibedakan warnanya: sebabnya lain, koreksinya
-                                // juga lain dari sekadar pagu yang kurang.
+                                // SATU BARIS PER PAKET. Dulu seluruh paket ditumpuk ke satu
+                                // sel "Nama Paket", dan enam paket membuat barisnya setinggi
+                                // layar dan praktis tidak terbaca.
+                                const urut = e.entries.slice().sort((a, b) => b.jumlah - a.jumlah);
+                                const barisAwal = curr_row;
+
                                 const fillArgb = kind === 'np' ? LIGHT_RED : LIGHT_ORANGE;
                                 const inkArgb  = kind === 'np' ? 'FFB91C1C' : 'FFC95D00';
-                                for (let c = 5; c <= 19; c++) {
-                                    const cell = ws.getCell(curr_row, c);
-                                    cell.fill = solid(fillArgb);
-                                    cell.border = border_thin;
-                                    cell.font = { name: FONT, size: 9, italic: true,
-                                                  bold: c === 17 || kind === 'np',
-                                                  color: { argb: inkArgb } };
-                                    if (c === 6 || c === 16) {
-                                        cell.alignment = { horizontal: 'left', vertical: 'middle', indent: 6, wrapText: true };
-                                    } else if (c === 17 || c === 18) {
-                                        cell.alignment = { horizontal: 'right', vertical: 'middle' };
-                                    } else {
-                                        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+
+                                urut.forEach((x, i) => {
+                                    if (i === 0) {
+                                        ws.getCell(curr_row, 6).value =
+                                            (EXCESS_TEXT[kind] || EXCESS_TEXT.over) + revisiNote(key) + myNote;
                                     }
+                                    ws.getCell(curr_row, 15).value = x.id;
+                                    ws.getCell(curr_row, 16).value = x.nama;
+                                    ws.getCell(curr_row, 17).value = x.jumlah;
+                                    ws.getCell(curr_row, 17).numFmt = '#,##0';
+                                    ws.getCell(curr_row, 18).value = -x.jumlah;
+                                    ws.getCell(curr_row, 18).numFmt = '#,##0';
+
+                                    for (let c = 5; c <= 19; c++) {
+                                        const cell = ws.getCell(curr_row, c);
+                                        cell.fill = solid(fillArgb);
+                                        cell.border = border_thin;
+                                        cell.font = { name: FONT, size: 9, italic: true,
+                                                      bold: c === 17 || kind === 'np',
+                                                      color: { argb: inkArgb } };
+                                        if (c === 6 || c === 16) {
+                                            cell.alignment = { horizontal: 'left', vertical: 'middle',
+                                                               indent: 6, wrapText: true };
+                                        } else if (c === 17 || c === 18) {
+                                            cell.alignment = { horizontal: 'right', vertical: 'middle' };
+                                        } else {
+                                            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+                                        }
+                                    }
+                                    curr_row++;
+                                });
+
+                                // Kolom keterangan digabung menaungi seluruh baris paket:
+                                // alasannya satu untuk seluruh blok, bukan per paket.
+                                const barisAkhir = curr_row - 1;
+                                if (barisAkhir > barisAwal) {
+                                    for (let c = 5; c <= 14; c++) {
+                                        ws.mergeCells(barisAwal, c, barisAkhir, c);
+                                    }
+                                    ws.getCell(barisAwal, 6).alignment = {
+                                        horizontal: 'left', vertical: 'middle', indent: 6, wrapText: true };
                                 }
-                                curr_row++;
                             }
 
                             // --- ITERATE AND WRITE ROWS ---
