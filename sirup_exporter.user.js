@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      2.4
+// @version      2.5
 // @description  Crawl RKA dan RUP dari SiRUP, lalu ekspor jadi laporan sanding Excel (dashboard, ringkasan, sanding berjenjang, detail per program). Tahun anggaran & satker terdeteksi otomatis.
 // @author       Fakhry-Glob
 // @match        https://sirup.inaproc.id/sirup/*
@@ -17,7 +17,7 @@
 
     // ═════════════════════════════════════════════════════════ KONFIGURASI ══
     const APP_TITLE = 'Sanding RKA & RUP';
-    const APP_VERSION = '2.4';
+    const APP_VERSION = '2.5';
 
     // Konteks runtime: diisi otomatis oleh detectContext(), bisa dikoreksi
     // pengguna lewat panel pra-ekspor sebelum crawling dimulai.
@@ -2427,6 +2427,8 @@
                             
                             // --- DETAILED MATCHING FOR LEVEL 3 DETAIL ROWS (PROPORTIONAL ALLOCATION) ---
                             const detail_row_objects = [];
+                            const np_by_key = new Map();      // akun bertanda NP/Gaji
+                            const revisi_by_key = new Map();  // jejak revisi per akun
                             let curr_subkomp = "";
                             let curr_akun = "";
                             for (let r_idx = 0; r_idx < komp_rows.length; r_idx++) {
@@ -2438,17 +2440,43 @@
                                 } else if (r.level === 3) {
                                     const is_np = rows_is_np[r_idx] || false;
                                     const is_gj = rows_is_gj[r_idx] || false;
+                                    const rkey = `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}.${curr_subkomp}.${curr_akun}`;
+
+                                    // Kolom "pagu sebelum revisi" sudah ikut ditarik dari
+                                    // RKA. Kalau pagu baris berubah, selisih RUP di akun ini
+                                    // besar kemungkinan soal RUP yang belum disesuaikan —
+                                    // bukan salah input. Itu bisa dikatakan, bukan ditebak.
+                                    if (!revisi_by_key.has(rkey)) {
+                                        revisi_by_key.set(rkey, { berubah: false, baru: false, prev: 0 });
+                                    }
+                                    const rv = revisi_by_key.get(rkey);
+                                    const pg = typeof r.pagu === 'number' ? r.pagu : 0;
+                                    if (typeof r.paguPrev === 'number') {
+                                        rv.prev += r.paguPrev;
+                                        if (r.paguPrev !== pg) rv.berubah = true;
+                                    } else if (pg > 0) {
+                                        rv.baru = true;   // baris belum ada sebelum revisi
+                                    }
                                     if (!is_np && !is_gj) {
                                         detail_row_objects.push({
                                             r_idx: r_idx,
                                             pagu: typeof r.pagu === 'number' ? r.pagu : 0,
-                                            key: `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}.${curr_subkomp}.${curr_akun}`,
+                                            key: rkey,
                                             allocated_pagu: 0,
                                             matched_ids: [],
                                             matched_names: [],
                                             cross_akun: false,
                                             is_draft_match: false
                                         });
+                                    } else {
+                                        // Baris NP/Gaji sengaja tidak ikut dialokasi, tapi
+                                        // akunnya tetap dicatat: kalau ada paket RUP yang
+                                        // MAK-nya menunjuk ke sini, itu temuan — bukan
+                                        // sekadar pagu yang kurang.
+                                        if (!np_by_key.has(rkey)) np_by_key.set(rkey, { np: false, gj: false });
+                                        const nrec = np_by_key.get(rkey);
+                                        if (is_np) nrec.np = true;
+                                        if (is_gj) nrec.gj = true;
                                     }
                                 }
                             }
@@ -2517,6 +2545,38 @@
                                 );
                             }
 
+                            // Akun yang punya baris pengadaan (bukan NP/Gaji).
+                            const procurement_keys = new Set(detail_row_objects.map(d => d.key));
+
+                            function recordExcess(pool, kind) {
+                                if (!excess_by_key.has(pool.key)) {
+                                    excess_by_key.set(pool.key, { total: 0, ids: [], names: [], kind });
+                                }
+                                const e = excess_by_key.get(pool.key);
+                                // Konflik NP adalah temuan paling keras; jangan sampai
+                                // tertutup label lain kalau satu akun kena beberapa sebab.
+                                if (kind === 'np') e.kind = 'np';
+                                e.total += pool.remaining_pagu;
+                                if (!e.ids.includes(pool.packet_id)) {
+                                    e.ids.push(pool.packet_id);
+                                    e.names.push(pool.packet_name);
+                                }
+                                pool.remaining_pagu = 0;
+                            }
+
+                            // Tahap 1b — paket yang MAK-nya menunjuk akun bertanda NP/Gaji.
+                            // Ini DITAHAN dari tahap luber: kalau dibiarkan mengalir ke akun
+                            // lain, paketnya akan terlihat tersanding rapi dan temuannya
+                            // hilang. Justru inilah yang perlu dikoreksi satker — entah
+                            // tanda NP-nya yang keliru, atau paketnya yang tidak seharusnya
+                            // dibuat di atas pagu NP.
+                            for (const pool of rup_pools_terumumkan) {
+                                if (pool.remaining_pagu <= 0) continue;
+                                if (np_by_key.has(pool.key) && !procurement_keys.has(pool.key)) {
+                                    recordExcess(pool, 'np');
+                                }
+                            }
+
                             // Tahap 2 — luber lintas akun, masih di dalam komponen ini.
                             // Satu kontrak outsourcing lazimnya menutup honor, jaminan
                             // ketenagakerjaan, dan jaminan kesehatan sekaligus: tiga akun
@@ -2526,21 +2586,11 @@
                                 fillRows(detail_row_objects, spill_pools, true);
                             }
 
-                            // Tahap 3 — sisa yang benar-benar melampaui pagu RKA komponen.
-                            // Dicatat per akun asal paket, lalu ditulis sebagai barisnya
-                            // sendiri supaya Detail tetap rekonsiliasi dengan subtotal.
+                            // Tahap 3 — sisa yang benar-benar tidak tertampung, dipisah
+                            // menurut sebabnya supaya satker tahu apa yang harus dikoreksi.
                             for (const pool of rup_pools_terumumkan) {
                                 if (pool.remaining_pagu <= 0) continue;
-                                if (!excess_by_key.has(pool.key)) {
-                                    excess_by_key.set(pool.key, { total: 0, ids: [], names: [] });
-                                }
-                                const e = excess_by_key.get(pool.key);
-                                e.total += pool.remaining_pagu;
-                                if (!e.ids.includes(pool.packet_id)) {
-                                    e.ids.push(pool.packet_id);
-                                    e.names.push(pool.packet_name);
-                                }
-                                pool.remaining_pagu = 0;
+                                recordExcess(pool, procurement_keys.has(pool.key) ? 'over' : 'nokey');
                             }
 
                             // Tahap 4 — baris yang masih kurang ditautkan ke paket
@@ -2591,13 +2641,46 @@
                             };
 
                             // Menulis satu baris "RUP melebihi pagu RKA".
+                            // Sebabnya bisa beberapa hal dan datanya tidak cukup untuk
+                            // memastikan yang mana. Jadi daftarkan, jangan menuduh satu.
+                            const EXCESS_TEXT = {
+                                np: 'TEMUAN — ada paket RUP di atas pagu yang ditandai Non-Pengadaan/Gaji. ' +
+                                    'Periksa: (1) tanda NP/Gaji pada baris RKA ini keliru; ' +
+                                    '(2) pagunya sudah direvisi sehingga baris ini berubah sifat; ' +
+                                    '(3) paket RUP-nya belum disesuaikan dengan pagu terbaru.',
+                                nokey: 'MAK paket tidak ada di RKA komponen ini. Periksa: (1) penulisan MAK pada ' +
+                                    'paket; (2) akun ini hilang atau berubah saat revisi dan RUP belum ' +
+                                    'disesuaikan.',
+                                over: 'RUP melebihi pagu RKA — tidak ada baris RKA yang menampung sisa paket ini. ' +
+                                    'Periksa: (1) pagu sudah direvisi turun; (2) RUP belum disesuaikan dengan ' +
+                                    'pagu terbaru; (3) nilai paketnya memang melebihi pagu.'
+                            };
+
+                            // Bukti revisi pada akun ini, kalau ada — ini yang membedakan
+                            // "salah input" dari "RUP-nya ketinggalan".
+                            function revisiNote(key) {
+                                const rv = revisi_by_key.get(key);
+                                if (!rv) return '';
+                                if (rv.berubah) {
+                                    return `  Catatan: pagu baris di akun ini BERUBAH saat revisi ` +
+                                           `(sebelum revisi Rp ${rv.prev.toLocaleString('id-ID')}) — ` +
+                                           `kemungkinan besar RUP belum disesuaikan.`;
+                                }
+                                if (rv.baru) {
+                                    return '  Catatan: baris di akun ini BARU muncul setelah revisi — ' +
+                                           'kemungkinan besar RUP belum disesuaikan.';
+                                }
+                                return '';
+                            }
+
                             function writeExcessRow(key) {
                                 const e = excess_by_key.get(key);
                                 if (!e || e.total <= 0 || excess_written.has(key)) return;
                                 excess_written.add(key);
+                                const kind = e.kind || 'over';
 
                                 ws.getCell(curr_row, 6).value =
-                                    'RUP melebihi pagu RKA — tidak ada baris RKA yang menampung sisa paket ini';
+                                    (EXCESS_TEXT[kind] || EXCESS_TEXT.over) + revisiNote(key);
                                 ws.getCell(curr_row, 15).value = e.ids.join(", ");
                                 ws.getCell(curr_row, 16).value = e.names.join(", ");
                                 ws.getCell(curr_row, 17).value = e.total;
@@ -2605,12 +2688,17 @@
                                 ws.getCell(curr_row, 18).value = -e.total;
                                 ws.getCell(curr_row, 18).numFmt = '#,##0';
 
+                                // Konflik NP dibedakan warnanya: sebabnya lain, koreksinya
+                                // juga lain dari sekadar pagu yang kurang.
+                                const fillArgb = kind === 'np' ? LIGHT_RED : LIGHT_ORANGE;
+                                const inkArgb  = kind === 'np' ? 'FFB91C1C' : 'FFC95D00';
                                 for (let c = 5; c <= 19; c++) {
                                     const cell = ws.getCell(curr_row, c);
-                                    cell.fill = solid(LIGHT_ORANGE);
+                                    cell.fill = solid(fillArgb);
                                     cell.border = border_thin;
-                                    cell.font = { name: FONT, size: 9, italic: true, bold: c === 17,
-                                                  color: { argb: 'FFC95D00' } };
+                                    cell.font = { name: FONT, size: 9, italic: true,
+                                                  bold: c === 17 || kind === 'np',
+                                                  color: { argb: inkArgb } };
                                     if (c === 6 || c === 16) {
                                         cell.alignment = { horizontal: 'left', vertical: 'middle', indent: 6, wrapText: true };
                                     } else if (c === 17 || c === 18) {

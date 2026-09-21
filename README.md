@@ -92,9 +92,30 @@ Paket B2 berpagu 23.000.000 dan terbelah ke dua baris. Urutannya tiga tahap:
    lazimnya menutup honor, jaminan ketenagakerjaan, dan jaminan kesehatan
    sekaligus — tiga akun berbeda. Baris yang terisi dari tahap ini ditandai
    *"[sebagian dari paket berakun lain]"* pada kolom nama paket.
-3. **Sisa yang benar-benar melebihi pagu** mendapat barisnya sendiri berwarna
-   oranye: *"RUP melebihi pagu RKA — tidak ada baris RKA yang menampung"*,
-   lengkap dengan ID paketnya.
+3. **Sisa yang tidak tertampung** mendapat barisnya sendiri, lengkap dengan ID
+   paketnya, dipisah menurut sebabnya.
+
+### Tiga jenis temuan pada baris sisa
+
+| Warna | Kapan muncul | Yang perlu diperiksa |
+|---|---|---|
+| 🔴 Merah — **TEMUAN** | Ada paket RUP di atas pagu yang ditandai **NP/Gaji** | Tanda NP/Gaji-nya keliru, pagunya sudah direvisi sehingga baris itu berubah sifat, atau RUP-nya belum disesuaikan |
+| 🟠 Oranye | RUP **melebihi pagu** RKA | Pagu sudah direvisi turun, RUP belum disesuaikan, atau nilai paketnya memang melebihi pagu |
+| 🟠 Oranye | **MAK tidak ada** di RKA komponen ini | Penulisan MAK pada paket, atau akunnya hilang/berubah saat revisi |
+
+Paket yang MAK-nya menunjuk akun ber-tanda NP **sengaja ditahan** dari tahap 2.
+Kalau dibiarkan meluber ke akun lain, paket itu akan terlihat tersanding rapi
+dan temuannya hilang — padahal justru itu yang perlu dikoreksi satker.
+
+**Bukti revisi ikut disebut.** Kolom *pagu sebelum revisi* sudah ditarik dari
+RKA, jadi kalau pagu di akun itu memang berubah, barisnya menambahkan:
+
+> Catatan: pagu baris di akun ini BERUBAH saat revisi (sebelum revisi
+> Rp 25.000.000) — kemungkinan besar RUP belum disesuaikan.
+
+atau, untuk baris yang belum ada sebelum revisi, *"baris di akun ini BARU muncul
+setelah revisi"*. Kalau tidak ada jejak revisi, catatan ini tidak dimunculkan —
+daripada menebak.
 
 **Sebuah baris tidak pernah menerima lebih dari pagunya.** Sampai v2.3 seluruh
 sisa paket ditumpahkan ke baris pertama tiap akun, sehingga baris berpagu
@@ -182,8 +203,19 @@ skenario lain.
 `dev/harness-alokasi.html` khusus menguji alokasi paket ke baris RKA dengan data
 kecil yang bisa dihitung tangan (kasus Pagu A/B/C di atas, termasuk Paket B2 yang
 terbelah lintas akun). Halaman ini membaca ulang file Excel hasilnya dan menaruh
-isi sheet Detail di `window.__detail`, jadi angkanya bisa diperiksa langsung dari
-console. Tambahkan `?excess=1` untuk memunculkan kasus RUP melebihi pagu.
+isi sheet Detail di `window.__detail`, jadi angkanya bisa diperiksa dari console.
+
+Tiap jenis temuan punya sakelarnya sendiri, bisa digabung:
+
+| Query | Yang diuji |
+|---|---|
+| *(tanpa query)* | Kasus Pagu A/B/C — semua Selisih harus 0 |
+| `?excess=1` | Paket 5.000.000 yang tidak muat di mana pun |
+| `?np=1` | Paket dibuat di atas pagu ber-tanda NP |
+| `?nokey=1` | MAK menunjuk akun yang tidak ada di RKA |
+
+Baris *Pagu A* sengaja dibuat berubah saat revisi (25.000.000 → 30.000.000)
+supaya catatan bukti revisi ikut teruji.
 
 Untuk menguji pembentukan Excel tanpa membuka SiRUP, jalankan `buildExcel()` di
 Node dengan ExcelJS asli dan data sintetis (stub `document`, `Blob`, dan `saveAs`),

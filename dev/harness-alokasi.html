@@ -22,11 +22,20 @@
 //
 // ?excess=1 menambah satu paket 5.000.000 yang tidak muat di mana pun,
 // untuk menguji baris "RUP melebihi pagu RKA".
-const WITH_EXCESS = new URLSearchParams(location.search).has('excess');
+// ?excess=1  -> paket 5.000.000 yang tidak muat di mana pun
+// ?np=1      -> paket dibuat di atas pagu ber-tanda NP (temuan, bukan kekurangan pagu)
+// ?nokey=1   -> MAK menunjuk akun yang tidak ada di RKA
+const Q = new URLSearchParams(location.search);
+const WITH_EXCESS = Q.has('excess');
+const WITH_NP     = Q.has('np');
+const WITH_NOKEY  = Q.has('nokey');
 
 const AKUN_AB = '521211';   // Pagu A & Pagu B
 const AKUN_C  = '521213';   // Pagu C  -> memaksa luber lintas akun
+const AKUN_NP = '512211';   // baris NP/honor
 const MAK_AB  = `DL.2375.SCC.831.101.0A.${AKUN_AB}`;
+const MAK_NP  = `DL.2375.SCC.831.101.0A.${AKUN_NP}`;
+const MAK_XX  = `DL.2375.SCC.831.101.0A.999999`;
 
 const PACKETS = [
   { id: 'A1', name: 'Paket A1', pagu: 12000000, mak: MAK_AB },
@@ -34,7 +43,9 @@ const PACKETS = [
   { id: 'B1', name: 'Paket B1', pagu:  7000000, mak: MAK_AB },
   { id: 'B2', name: 'Paket B2', pagu: 23000000, mak: MAK_AB },
 ];
-if (WITH_EXCESS) PACKETS.push({ id: 'X1', name: 'Paket Kelebihan', pagu: 5000000, mak: MAK_AB });
+if (WITH_EXCESS) PACKETS.push({ id: 'X1', name: 'Paket Kelebihan',        pagu: 5000000, mak: MAK_AB });
+if (WITH_NP)     PACKETS.push({ id: 'N1', name: 'Paket atas pagu NP',     pagu: 4000000, mak: MAK_NP });
+if (WITH_NOKEY)  PACKETS.push({ id: 'K1', name: 'Paket MAK salah akun',   pagu: 3000000, mak: MAK_XX });
 
 const json = (o) => Promise.resolve(new Response(JSON.stringify(o), {status:200, headers:{'content-type':'application/json'}}));
 const html = (t) => Promise.resolve(new Response(t, {status:200, headers:{'content-type':'text/html'}}));
@@ -44,10 +55,12 @@ const RKA_TABLE = `<table>
 <tr class="komponenTr"><td>101</td><td>Komponen Uji</td><td></td><td>60.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
 <tr class="subKomponenTr"><td>0A</td><td>Sub Komponen</td><td></td><td>60.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
 <tr class="akunTr"><td>${AKUN_AB}</td><td>Belanja Bahan</td><td></td><td>50.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
-<tr class="detilTr"><td>1</td><td>Pagu A</td><td></td><td>30.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="detilTr"><td>1</td><td>Pagu A</td><td>Pagu A sebelum revisi</td><td>30.000.000</td><td>25.000.000</td><td></td><td></td><td></td><td></td><td></td></tr>
 <tr class="detilTr"><td>2</td><td>Pagu B</td><td></td><td>20.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
 <tr class="akunTr"><td>${AKUN_C}</td><td>Belanja Jasa</td><td></td><td>10.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
 <tr class="detilTr"><td>3</td><td>Pagu C</td><td></td><td>10.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="akunTr"><td>${AKUN_NP}</td><td>Belanja Honor</td><td></td><td>8.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="detilTr"><td>4</td><td>Honor PJLP (NP)</td><td></td><td>8.000.000</td><td>-</td><td></td><td></td><td></td><td><i class="glyphicon glyphicon-ok"></i></td><td></td></tr>
 </table>`;
 
 const origFetch = window.fetch.bind(window);
