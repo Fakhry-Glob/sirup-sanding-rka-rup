@@ -108,6 +108,30 @@ Cek sintaks:
 node --check sirup_exporter.user.js
 ```
 
+### Harness uji tanpa SiRUP
+
+`dev/harness.html` adalah halaman SiRUP palsu: seluruh permintaan jaringan
+di-stub, jadi panel, progres, penomoran halaman paket, dan penanganan kegagalan
+bisa diuji tanpa login dan tanpa membebani server SiRUP.
+
+```bash
+python -m http.server 4319
+# buka http://localhost:4319/dev/harness.html
+```
+
+Yang sengaja disiapkan di dalamnya:
+
+- **1.200 paket** — di atas satu halaman, jadi penarikan bertahap ikut teruji;
+- **4 paket yang dibalas HTTP 503** — memunculkan lencana peringatan dan
+  catatan "data tidak utuh" di akhir;
+- **sel NP berupa ikon glyphicon**, bukan `<input>` — bentuk markup yang dulu
+  membuat non-pengadaan terbaca nol;
+- **nama satker berisi `& " < >`** — menangkap kebocoran escape di panel;
+- `saveAs` dicegat, jadi tidak ada file yang benar-benar terunduh.
+
+Ubah `TOTAL_PACKETS` dan `FAILING_DETAILS` di bagian atas file untuk menguji
+skenario lain.
+
 Untuk menguji pembentukan Excel tanpa membuka SiRUP, jalankan `buildExcel()` di
 Node dengan ExcelJS asli dan data sintetis (stub `document`, `Blob`, dan `saveAs`),
 lalu baca ulang file hasilnya untuk memeriksa `numFmt`, warna, freeze pane, dan

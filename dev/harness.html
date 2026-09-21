@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>SiRUP stub — harness</title>
+<style>
+  body { font-family: "Segoe UI", system-ui, sans-serif; margin: 0; padding: 24px; background:#eef2f7; }
+  h1 { font-size: 18px; color:#1F497D; }
+  .fake { background:#fff; border:1px solid #d9dee6; border-radius:8px; padding:16px; max-width:760px; }
+  label { font-size:12px; font-weight:600; display:block; margin:10px 0 4px; }
+  select { padding:6px; }
+  #mode { margin-top:14px; font-size:12px; color:#475569 }
+  code { background:#f1f5f9; padding:1px 5px; border-radius:4px }
+</style>
+</head>
+<body>
+<h1>Stub SiRUP — Struktur Anggaran</h1>
+<div class="fake">
+  <p style="font-size:13px;color:#475569;margin-top:0">
+    Halaman palsu untuk menguji panel userscript. Satuan Kerja : Balai Pelatihan &amp; "Riset" &lt;Tegal&gt;
+  </p>
+  <label for="tahunAnggaran">Tahun Anggaran</label>
+  <select id="tahunAnggaran">
+    <option value="2024">2024</option>
+    <option value="2026" selected>2026</option>
+  </select>
+
+  <label for="idSatker">Satuan Kerja</label>
+  <select id="idSatker">
+    <option value="411234">[411234] Balai Pelatihan &amp; "Riset" &lt;Tegal&gt;</option>
+  </select>
+
+  <label for="idProgram">Program</label>
+  <select id="idProgram">
+    <option value=""></option>
+    <option value="P1">[032.12.DA] Program Kualitas SDM Kelautan</option>
+    <option value="P2">[032.12.GG] Program Dukungan Manajemen</option>
+  </select>
+
+  <div id="mode">
+    Semua permintaan jaringan di-stub. Tekan tombol <code>Ekspor Sanding RKA &amp; RUP</code> di kanan bawah.
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+<script>
+// ──────────────────────────────────────────── stub network ──
+const TOTAL_PACKETS = 1200;          // > 1000 -> exercises pagination
+const FAILING_DETAILS = new Set([7, 33, 104, 800]);  // exercises the failure badge
+window.__calls = { pages: [], failures: 0 };
+
+const json = (obj, delay = 12) => new Promise(r => setTimeout(
+  () => r(new Response(JSON.stringify(obj), { status: 200, headers: { 'content-type': 'application/json' } })), delay));
+const html = (s, delay = 6) => new Promise(r => setTimeout(
+  () => r(new Response(s, { status: 200, headers: { 'content-type': 'text/html' } })), delay));
+
+function rkaTable(seed) {
+  // level classes: komponenTr / subKomponenTr / akunTr / detilTr
+  // NP cell (td index 8) rendered as a GLYPHICON, not an <input>, on purpose:
+  // that is the role-dependent markup the fix has to cope with.
+  const np = seed % 3 === 0 ? '<i class="glyphicon glyphicon-ok"></i>'
+                            : '<i class="glyphicon glyphicon-remove"></i>';
+  return `<table><tr><th>Kode</th><th>Uraian</th><th>Prev</th><th>Pagu</th><th>PaguPrev</th>
+    <th>P</th><th>S</th><th>MY</th><th>NP</th><th>GJ</th></tr>
+    <tr class="komponenTr"><td>051</td><td>Komponen ${seed}</td><td></td><td>500.000.000</td><td>-</td>
+      <td></td><td></td><td></td><td>${np}</td><td><i class="glyphicon glyphicon-remove"></i></td></tr>
+    <tr class="subKomponenTr"><td>A</td><td>Sub ${seed}</td><td></td><td>500.000.000</td><td>-</td>
+      <td></td><td></td><td></td><td></td><td></td></tr>
+    <tr class="akunTr"><td>521211</td><td>Belanja Bahan</td><td></td><td>500.000.000</td><td>-</td>
+      <td></td><td></td><td></td><td></td><td></td></tr>
+    <tr class="detilTr"><td>1</td><td>Rincian ${seed}</td><td></td><td>300.000.000</td><td>-</td>
+      <td></td><td></td><td></td><td></td><td></td></tr>
+    <tr class="detilTr"><td>2</td><td>Rincian lain ${seed}</td><td></td><td>200.000.000</td><td>-</td>
+      <td></td><td></td><td></td><td></td><td></td></tr>
+  </table>`;
+}
+
+function packetDetail(i) {
+  return `<html><body><table>
+    <tr><th>No</th><th>Uraian</th><th>Jenis</th><th>Sumber Dana</th><th>MAK</th><th>Pagu</th></tr>
+    <tr><td>1.</td><td>x</td><td>y</td><td>APBN</td>
+        <td>032.12.DA.1234.QDB.051.A.521211</td><td>Rp. ${(1000000 + i * 137).toLocaleString('id-ID')}</td></tr>
+  </table></body></html>`;
+}
+
+const origFetch = window.fetch.bind(window);
+window.fetch = async function (url, opts) {
+  const u = String(url);
+  const body = (opts && opts.body) || '';
+
+  if (u.includes('daftarkegiatanbyprogram'))
+    return json([{ id: 'K1', nama: 'Kegiatan Pelatihan', kode_kegiatans: '1234' },
+                 { id: 'K2', nama: 'Kegiatan Sertifikasi', kode_kegiatans: '1235' },
+                 { id: 'K3', nama: 'Kegiatan Dukungan', kode_kegiatans: '1236' }], 140);
+
+  if (u.includes('daftaroutputbykegiatan'))
+    return json([{ id: 'O1', nama: 'Output SDM', kode_output_string: 'QDB' }], 60);
+
+  if (u.includes('daftarsuboutputbyoutput'))
+    return json([{ id: 'R1', nama: 'RO Pelatihan', kode_suboutput_string: '051' }], 60);
+
+  if (u.includes('daftarkomponenbysuboutput'))
+    return json(Array.from({ length: 6 }, (_, i) =>
+      ({ id: 'C' + i, nama: 'Komponen ' + i, kode_komponen_string: '05' + i, pagu: 500000000 })), 60);
+
+  if (u.includes('rkakontentable2018')) {
+    const m = u.match(/idKomponen=C(\d+)/);
+    return html(rkaTable(m ? +m[1] : 0), 40);
+  }
+
+  if (u.includes('dataruppenyedia2018')) {
+    const start = +(body.match(/start=(\d+)/) || [0, 0])[1];
+    const len   = +(body.match(/length=(\d+)/) || [0, 1000])[1];
+    window.__calls.pages.push({ start, len });
+    const rows = [];
+    for (let i = start; i < Math.min(start + len, TOTAL_PACKETS); i++) {
+      rows.push([ 'PKT' + i, 'Kegiatan Pelatihan', 'Paket Pengadaan ' + i, '1.500.000',
+                  'Januari', 'APBN',
+                  '<input type="checkbox" checked>', '<input type="checkbox" checked>',
+                  i % 7 === 0 ? '<input type="checkbox">' : '<input type="checkbox" checked>',
+                  '', '', '', '', '032.12.DA.1234.QDB.051.A.521211' ]);
+    }
+    return json({ aaData: rows, iTotalDisplayRecords: TOTAL_PACKETS, iTotalRecords: TOTAL_PACKETS }, 120);
+  }
+
+  if (u.includes('datarupswakelola2018')) return json({ aaData: [1, 2, 3] }, 40);
+
+  if (u.includes('/sirup/penyedia/')) {
+    const i = +(u.match(/PKT(\d+)/) || [0, 0])[1];
+    if (FAILING_DETAILS.has(i)) {           // simulate a flaky server
+      window.__calls.failures++;
+      return new Response('boom', { status: 503, statusText: 'Service Unavailable' });
+    }
+    return html(packetDetail(i), 2);
+  }
+
+  return origFetch(url, opts);
+};
+
+// keep the browser from actually downloading during the harness run
+window.saveAs = function (blob, name) {
+  window.__savedFile = { name, size: blob.size };
+  console.log('[harness] saveAs intercepted:', name, blob.size, 'bytes');
+};
+</script>
+<script src="../sirup_exporter.user.js"></script>
+</body>
+</html>

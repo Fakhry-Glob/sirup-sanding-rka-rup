@@ -172,11 +172,45 @@
     .srx-log p.success { color: #166534; background: #f0fdf4; border-left-color: #22c55e; font-weight: 600; }
     .srx-log p.step    { color: #1e3a8a; background: #eff6ff; border-left-color: #2E6DA4; font-weight: 600; margin-top: 3px; }
 
+    /* Lencana peringatan di kop: kegagalan penarikan tidak boleh hilang
+       tergulung di dalam log yang panjang. */
+    .srx-badge {
+        margin-left: 8px; flex: none; display: none; align-items: center; gap: 5px;
+        font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px;
+        background: #fef2f2; color: #b91c1c; border: 1px solid #fca5a5; cursor: pointer;
+    }
+    .srx-badge.show { display: inline-flex; }
+    .srx-badge.warn-only { background: #fffbeb; color: #92400e; border-color: #fcd34d; }
+
+    .srx-eta { font: 400 12px/1 "Segoe UI", monospace; color: #94a3b8; min-width: 78px; text-align: right; }
+
+    .srx-log p.pinned { outline: 1px dashed #fca5a5; }
+
     .srx-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
     .srx-card { padding: 11px 13px; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; }
     .srx-card span { display: block; font-size: 10.5px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: .4px; }
     .srx-card strong { display: block; margin-top: 4px; font-size: 17px; font-weight: 700; color: #1F497D; }
+
+    @media (max-width: 620px) {
+        .srx-grid { grid-template-columns: 1fr; gap: 6px; }
+        .srx-summary { grid-template-columns: 1fr; }
+        .srx-steps li { font-size: 0; padding-top: 18px; }
+        .srx-dialog { max-height: 94vh; }
+        .srx-fab span { display: none; }
+        .srx-fab { padding: 14px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .srx, .srx * { animation: none !important; transition: none !important; }
+    }
     `;
+
+    // Nama satker datang dari markup SiRUP dan ikut disisipkan lewat innerHTML;
+    // tanpa escape, satu karakter & atau < merusak tampilan panel.
+    function esc(v) {
+        return String(v == null ? '' : v)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
 
     function injectStyles() {
         if (document.getElementById('srx-style')) return;
@@ -276,10 +310,17 @@
     }
 
     // ══════════════════════════════════════════════════ PANEL PRA-EKSPOR ══
+    let lastFocused = null;
+
     function closeOverlay() {
         const el = document.getElementById('srx-overlay');
         if (el) el.remove();
         document.removeEventListener('keydown', onEsc);
+        document.removeEventListener('keydown', onTrapTab, true);
+        if (lastFocused && document.contains(lastFocused)) {
+            try { lastFocused.focus(); } catch (e) { /* elemen sudah hilang */ }
+        }
+        lastFocused = null;
     }
 
     function onEsc(e) {
@@ -289,16 +330,37 @@
         }
     }
 
+    const FOCUSABLE = 'button:not(:disabled), [href], input:not(:disabled), ' +
+                      'select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+    // Tab tidak boleh lolos ke halaman SiRUP di belakang dialog.
+    function onTrapTab(e) {
+        if (e.key !== 'Tab') return;
+        const dlg = document.querySelector('#srx-overlay .srx-dialog');
+        if (!dlg) return;
+        const items = Array.from(dlg.querySelectorAll(FOCUSABLE)).filter(el => el.offsetParent !== null);
+        if (items.length === 0) return;
+        const first = items[0], last = items[items.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault(); last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault(); first.focus();
+        }
+    }
+
     function buildOverlay(headTitle, headSub, bodyHtml, closable) {
         closeOverlay();
+        lastFocused = document.activeElement;
         const overlay = document.createElement('div');
         overlay.id = 'srx-overlay';
         overlay.className = 'srx srx-overlay';
         overlay.dataset.closable = closable ? '1' : '0';
         overlay.innerHTML =
-            '<div class="srx-dialog" role="dialog" aria-modal="true">' +
+            '<div class="srx-dialog" role="dialog" aria-modal="true" aria-labelledby="srx-dlg-title">' +
                 '<div class="srx-head">' +
-                    '<div><h3>' + headTitle + '</h3><p>' + headSub + '</p></div>' +
+                    '<div><h3 id="srx-dlg-title">' + esc(headTitle) + '</h3><p>' + esc(headSub) + '</p></div>' +
+                    '<button type="button" class="srx-badge" id="srx-badge" ' +
+                        'title="Lompat ke peringatan pertama"></button>' +
                     '<span class="srx-ver">v' + APP_VERSION + '</span>' +
                 '</div>' +
                 '<div class="srx-body">' + bodyHtml + '</div>' +
@@ -306,6 +368,7 @@
             '</div>';
         document.body.appendChild(overlay);
         document.addEventListener('keydown', onEsc);
+        document.addEventListener('keydown', onTrapTab, true);
         return overlay;
     }
 
@@ -328,9 +391,9 @@
             '<div class="srx-field srx-grid">' +
                 '<label class="srx-label" for="srx-satker">Nama Satker</label>' +
                 '<div><input class="srx-input" id="srx-satker" type="text" placeholder="Nama satuan kerja" value="' +
-                    String(ctx.satkerName || '').replace(/"/g, '&quot;') + '">' +
+                    esc(ctx.satkerName) + '">' +
                 '<div class="srx-hint">Muncul di kop setiap sheet laporan. ID Satker aktif: <b>' +
-                    (ctx.satkerId || 'bawaan sesi login') + '</b></div></div>' +
+                    esc(ctx.satkerId || 'bawaan sesi login') + '</b></div></div>' +
             '</div>' +
             '<div class="srx-note">' +
                 '<span>&#9432;</span>' +
@@ -347,6 +410,7 @@
             '<button type="button" class="srx-btn srx-btn-primary" id="srx-start">Mulai Ekspor</button>';
 
         overlay.querySelector('#srx-cancel').addEventListener('click', closeOverlay);
+        overlay.querySelector('#srx-start').focus();
         overlay.querySelector('#srx-start').addEventListener('click', () => {
             ctx.tahun = parseInt(overlay.querySelector('#srx-tahun').value, 10) || new Date().getFullYear();
             ctx.satkerName = overlay.querySelector('#srx-satker').value.trim();
@@ -359,6 +423,7 @@
     let ui = null;
     let startedAt = 0;
     let timerId = null;
+    let exportRunning = false;
 
     function stepForProgress(p) {
         if (p == null) return null;
@@ -392,10 +457,13 @@
             'Tahun ' + ctx.tahun + (ctx.satkerName ? ' • ' + ctx.satkerName : ''),
             '<ul class="srx-steps">' + STEPS.map(s => '<li>' + s + '</li>').join('') + '</ul>' +
             '<div class="srx-progress-row">' +
-                '<div class="srx-track"><div class="srx-bar running"></div></div>' +
+                '<div class="srx-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" ' +
+                    'aria-valuenow="0" aria-label="Kemajuan ekspor">' +
+                    '<div class="srx-bar running"></div></div>' +
                 '<div class="srx-pct">0%</div><div class="srx-timer">00:00</div>' +
+                '<div class="srx-eta" title="Perkiraan sisa waktu">&ndash;&ndash;:&ndash;&ndash;</div>' +
             '</div>' +
-            '<div class="srx-log"></div>',
+            '<div class="srx-log" role="log" aria-live="polite" aria-relevant="additions"></div>',
             false
         );
 
@@ -412,20 +480,67 @@
         ui = {
             overlay,
             bar: overlay.querySelector('.srx-bar'),
+            track: overlay.querySelector('.srx-track'),
             pct: overlay.querySelector('.srx-pct'),
             timer: overlay.querySelector('.srx-timer'),
+            eta: overlay.querySelector('.srx-eta'),
             logBox: overlay.querySelector('.srx-log'),
+            badge: overlay.querySelector('#srx-badge'),
             steps: Array.from(overlay.querySelectorAll('.srx-steps li')),
-            foot
+            foot,
+            problems: [],
+            lastPct: 0
         };
+
+        // Klik lencana -> lompat ke peringatan berikutnya.
+        let problemCursor = 0;
+        ui.badge.addEventListener('click', () => {
+            if (ui.problems.length === 0) return;
+            ui.problems.forEach(el => el.classList.remove('pinned'));
+            const el = ui.problems[problemCursor % ui.problems.length];
+            problemCursor++;
+            el.classList.add('pinned');
+            el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        });
 
         startedAt = Date.now();
         clearInterval(timerId);
-        timerId = setInterval(() => {
-            if (ui) ui.timer.textContent = fmtElapsed(Date.now() - startedAt);
-        }, 1000);
+        timerId = setInterval(tickTimer, 1000);
+
+        // Ekspor satker besar makan menit; menutup atau meninggalkan tab di
+        // tengah jalan membuang seluruh penarikan tanpa peringatan apa pun.
+        window.addEventListener('beforeunload', guardUnload);
 
         setStep(0);
+    }
+
+    function guardUnload(e) {
+        if (!ui || !exportRunning) return;
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+    }
+
+    function tickTimer() {
+        if (!ui) return;
+        const elapsed = Date.now() - startedAt;
+        ui.timer.textContent = fmtElapsed(elapsed);
+        // ETA linear dari kemajuan sejauh ini — kasar, tapi cukup untuk tahu
+        // apakah ini soal dua menit atau dua puluh.
+        if (ui.lastPct >= 5 && ui.lastPct < 100) {
+            const remaining = elapsed * (100 - ui.lastPct) / ui.lastPct;
+            ui.eta.textContent = '~' + fmtElapsed(remaining);
+        }
+    }
+
+    function refreshBadge() {
+        if (!ui) return;
+        const n = ui.problems.length;
+        if (n === 0) { ui.badge.classList.remove('show'); return; }
+        const anyError = ui.problems.some(el => el.classList.contains('error'));
+        ui.badge.classList.add('show');
+        ui.badge.classList.toggle('warn-only', !anyError);
+        ui.badge.textContent = '\u26A0 ' + n + (anyError ? ' masalah' : ' peringatan');
     }
 
     function setStep(idx) {
@@ -436,18 +551,39 @@
         });
     }
 
+    const LOG_MAX_LINES = 400;
+
     function log(message, progress = null, type = null) {
         if (!ui) return;
         const p = document.createElement('p');
         p.className = type || classifyMessage(message);
         p.textContent = message;
         ui.logBox.appendChild(p);
+
+        if (p.className === 'error' || p.className === 'warn') {
+            ui.problems.push(p);
+            refreshBadge();
+        }
+
+        // Satker besar menghasilkan ribuan baris; menyimpan semuanya di DOM
+        // memperlambat panel. Baris peringatan tidak pernah dibuang.
+        while (ui.logBox.childElementCount > LOG_MAX_LINES) {
+            const first = ui.logBox.firstElementChild;
+            if (!first) break;
+            if (first.className === 'error' || first.className === 'warn') {
+                ui.logBox.appendChild(first);   // pindahkan ke akhir, jangan hapus
+                break;
+            }
+            first.remove();
+        }
         ui.logBox.scrollTop = ui.logBox.scrollHeight;
 
         if (progress !== null) {
             const pct = Math.max(0, Math.min(100, Math.round(progress)));
+            ui.lastPct = pct;
             ui.bar.style.width = pct + '%';
             ui.pct.textContent = pct + '%';
+            if (ui.track) ui.track.setAttribute('aria-valuenow', String(pct));
             const s = stepForProgress(progress);
             if (s !== null) setStep(s);
         }
@@ -455,34 +591,54 @@
 
     function finishSuccess(cards) {
         if (!ui) return;
-        clearInterval(timerId);
+        endRun();
         ui.bar.classList.remove('running');
         ui.bar.classList.add('ok');
         ui.bar.style.width = '100%';
         ui.pct.textContent = '100%';
+        ui.eta.textContent = fmtElapsed(Date.now() - startedAt);
+        ui.eta.title = 'Total waktu';
         ui.steps.forEach(li => { li.classList.remove('active'); li.classList.add('done'); });
 
         if (cards && cards.length) {
             const box = document.createElement('div');
             box.className = 'srx-summary';
             box.innerHTML = cards
-                .map(c => '<div class="srx-card"><span>' + c.label + '</span><strong>' + c.value + '</strong></div>')
+                .map(c => '<div class="srx-card"><span>' + esc(c.label) + '</span><strong>' +
+                          esc(c.value) + '</strong></div>')
                 .join('');
             ui.logBox.parentNode.insertBefore(box, ui.logBox);
+        }
+
+        // Ekspor bisa "berhasil" sambil menyembunyikan data yang gagal ditarik.
+        // Katakan itu di akhir, bukan hanya di baris log yang sudah tergulung.
+        const errs = ui.problems.filter(el => el.classList.contains('error')).length;
+        if (errs > 0) {
+            const note = document.createElement('div');
+            note.className = 'srx-note';
+            note.style.cssText = 'background:#fef2f2;border-color:#fca5a5;color:#991b1b;margin-bottom:12px';
+            note.innerHTML = '<span>&#9888;</span><span><b>File sudah terunduh, tapi datanya tidak utuh.</b> ' +
+                'Ada ' + errs + ' kegagalan penarikan di log — angka capaian di laporan ini ' +
+                'lebih rendah dari keadaan sebenarnya. Klik lencana merah di kop untuk melihatnya, ' +
+                'lalu ulangi ekspor sebelum dipakai untuk monev.</span>';
+            ui.logBox.parentNode.insertBefore(note, ui.logBox);
         }
 
         ui.foot.innerHTML =
             '<span class="srx-spacer"></span>' +
             '<button type="button" class="srx-btn srx-btn-primary" id="srx-done">Selesai</button>';
-        ui.foot.querySelector('#srx-done').addEventListener('click', hideLogger);
+        const done = ui.foot.querySelector('#srx-done');
+        done.addEventListener('click', hideLogger);
+        done.focus();
         ui.overlay.dataset.closable = '1';
     }
 
     function finishError(err) {
         if (!ui) return;
-        clearInterval(timerId);
+        endRun();
         ui.bar.classList.remove('running');
         ui.bar.classList.add('fail');
+        ui.eta.textContent = '';
         ui.steps.forEach(li => li.classList.remove('active'));
 
         ui.foot.innerHTML =
@@ -490,12 +646,22 @@
             '<button type="button" class="srx-btn srx-btn-ghost" id="srx-close">Tutup</button>' +
             '<button type="button" class="srx-btn srx-btn-primary" id="srx-retry">Coba Lagi</button>';
         ui.foot.querySelector('#srx-close').addEventListener('click', hideLogger);
-        ui.foot.querySelector('#srx-retry').addEventListener('click', () => { hideLogger(); openPanel(); });
+        const retry = ui.foot.querySelector('#srx-retry');
+        retry.addEventListener('click', () => { hideLogger(); openPanel(); });
+        retry.focus();
         ui.overlay.dataset.closable = '1';
     }
 
-    function hideLogger() {
+    // Satu tempat untuk melepas timer dan penjaga unload, apa pun hasilnya.
+    function endRun() {
+        exportRunning = false;
         clearInterval(timerId);
+        timerId = null;
+        window.removeEventListener('beforeunload', guardUnload);
+    }
+
+    function hideLogger() {
+        endRun();
         closeOverlay();
         ui = null;
     }
@@ -692,6 +858,7 @@
 
     // MAIN EXPORT CONTROLLER
     async function startExport() {
+        exportRunning = true;
         showLogger();
         log('Memulai proses ekspor sanding RKA & RUP...', 5);
         
@@ -736,14 +903,23 @@
             let totalSteps = programs.length;
             let currentStep = 0;
             
+            // Fase RKA memakai jatah 10%..40%. Sebelumnya bar hanya bergerak saat
+            // ganti program, jadi satker dengan 2-3 program terlihat menggantung
+            // bermenit-menit. Sekarang kegiatan ikut menggerakkannya.
+            const RKA_FROM = 10, RKA_SPAN = 30;
+            const rkaProgress = (progIdx, kegFrac) =>
+                RKA_FROM + ((progIdx + kegFrac) / Math.max(1, totalSteps)) * RKA_SPAN;
+
             for (const prog of programs) {
                 throwIfAborted();
+                const progIdx = currentStep;
                 currentStep++;
-                log(`[RKA] Memproses Program: ${prog.text}...`, 10 + (currentStep / totalSteps * 30));
-                
+                log(`[RKA] Memproses Program: ${prog.text}...`, rkaProgress(progIdx, 0));
+
                 const kegiatans = await postForm('/sirup/selfservice/daftarkegiatanbyprogram', `idProgram=${prog.id}`);
                 const progData = { id: prog.id, text: prog.text, kegiatans: [] };
-                
+
+                let kegDone = 0;
                 for (const keg of kegiatans) {
                     const outputs = await postForm('/sirup/selfservice/daftaroutputbykegiatan', `idKegiatan=${keg.id}`);
                     const kegData = { id: keg.id, name: keg.nama, code: keg.kode_kegiatans || keg.kode_kegiatand, outputs: [] };
@@ -785,6 +961,11 @@
                         kegData.outputs.push(outData);
                     }
                     progData.kegiatans.push(kegData);
+                    kegDone++;
+                    if (kegiatans.length > 1) {
+                        log(`[RKA] ${prog.text.slice(0, 48)} — kegiatan ${kegDone}/${kegiatans.length}`,
+                            rkaProgress(progIdx, kegDone / kegiatans.length));
+                    }
                 }
                 rkaData.push(progData);
             }
