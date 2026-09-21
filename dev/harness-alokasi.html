@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="id">
+<head><meta charset="utf-8"><title>Alloc harness</title></head>
+<body>
+<div class="fake">
+  <select id="tahunAnggaran"><option value="2026" selected>2026</option></select>
+  <select id="idSatker"><option value="14564">[14564] Satker Uji</option></select>
+  <select id="idProgram">
+    <option value=""></option>
+    <option value="P1">[DL] Program Uji Alokasi</option>
+  </select>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+<script>
+// Skenario dari sketsa pengguna:
+//   Pagu A 30.000.000  <- Paket A1 12.000.000 + Paket A2 18.000.000
+//   Pagu B 20.000.000  <- Paket B1  7.000.000 + Paket B2 13.000.000
+//   Pagu C 10.000.000  <- Paket B2 10.000.000   (sisa B2, AKUN BERBEDA)
+// Paket B2 total 23.000.000 dan harus terbelah ke dua baris.
+//
+// ?excess=1 menambah satu paket 5.000.000 yang tidak muat di mana pun,
+// untuk menguji baris "RUP melebihi pagu RKA".
+const WITH_EXCESS = new URLSearchParams(location.search).has('excess');
+
+const AKUN_AB = '521211';   // Pagu A & Pagu B
+const AKUN_C  = '521213';   // Pagu C  -> memaksa luber lintas akun
+const MAK_AB  = `DL.2375.SCC.831.101.0A.${AKUN_AB}`;
+
+const PACKETS = [
+  { id: 'A1', name: 'Paket A1', pagu: 12000000, mak: MAK_AB },
+  { id: 'A2', name: 'Paket A2', pagu: 18000000, mak: MAK_AB },
+  { id: 'B1', name: 'Paket B1', pagu:  7000000, mak: MAK_AB },
+  { id: 'B2', name: 'Paket B2', pagu: 23000000, mak: MAK_AB },
+];
+if (WITH_EXCESS) PACKETS.push({ id: 'X1', name: 'Paket Kelebihan', pagu: 5000000, mak: MAK_AB });
+
+const json = (o) => Promise.resolve(new Response(JSON.stringify(o), {status:200, headers:{'content-type':'application/json'}}));
+const html = (t) => Promise.resolve(new Response(t, {status:200, headers:{'content-type':'text/html'}}));
+
+const RKA_TABLE = `<table>
+<tr><th>Kode</th><th>Uraian</th><th>Prev</th><th>Pagu</th><th>PaguPrev</th><th>P</th><th>S</th><th>MY</th><th>NP</th><th>GJ</th></tr>
+<tr class="komponenTr"><td>101</td><td>Komponen Uji</td><td></td><td>60.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="subKomponenTr"><td>0A</td><td>Sub Komponen</td><td></td><td>60.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="akunTr"><td>${AKUN_AB}</td><td>Belanja Bahan</td><td></td><td>50.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="detilTr"><td>1</td><td>Pagu A</td><td></td><td>30.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="detilTr"><td>2</td><td>Pagu B</td><td></td><td>20.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="akunTr"><td>${AKUN_C}</td><td>Belanja Jasa</td><td></td><td>10.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr class="detilTr"><td>3</td><td>Pagu C</td><td></td><td>10.000.000</td><td>-</td><td></td><td></td><td></td><td></td><td></td></tr>
+</table>`;
+
+const origFetch = window.fetch.bind(window);
+window.fetch = async function (url, opts) {
+  const u = String(url);
+  if (u.includes('daftarkegiatanbyprogram'))  return json([{id:'K1', nama:'Kegiatan Uji', kode_kegiatans:'2375'}]);
+  if (u.includes('daftaroutputbykegiatan'))   return json([{id:'O1', nama:'Output Uji', kode_output_string:'SCC'}]);
+  if (u.includes('daftarsuboutputbyoutput'))  return json([{id:'R1', nama:'RO Uji', kode_suboutput_string:'831'}]);
+  if (u.includes('daftarkomponenbysuboutput'))return json([{id:'C1', nama:'Komponen Uji', kode_komponen_string:'101', pagu:60000000}]);
+  if (u.includes('rkakontentable2018'))       return html(RKA_TABLE);
+  if (u.includes('datarupswakelola2018'))     return json({aaData: []});
+  if (u.includes('dataruppenyedia2018')) {
+    const rows = PACKETS.map(p => ([ p.id, 'Kegiatan Uji', p.name, String(p.pagu).replace(/\B(?=(\d{3})+(?!\d))/g,'.'),
+      'Januari', 'APBN', '<input type="checkbox" checked>', '<input type="checkbox" checked>',
+      '<input type="checkbox" checked>', '', '', '', '', p.mak ]));
+    return json({ aaData: rows, iTotalDisplayRecords: rows.length, iTotalRecords: rows.length });
+  }
+  if (u.includes('/sirup/penyedia/')) {
+    const id = u.split('/').pop();
+    const p = PACKETS.find(x => x.id === id);
+    return html(`<html><body><table>
+      <tr><th>No</th><th>Uraian</th><th>Jenis</th><th>Sumber Dana</th><th>MAK</th><th>Pagu</th></tr>
+      <tr><td>1.</td><td>x</td><td>y</td><td>APBN</td><td>${p.mak}</td>
+          <td>Rp. ${String(p.pagu).replace(/\B(?=(\d{3})+(?!\d))/g,'.')}</td></tr>
+    </table></body></html>`);
+  }
+  return origFetch(url, opts);
+};
+
+// Tangkap workbook-nya, lalu baca ulang sheet Detail.
+window.saveAs = async function (blob) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(await blob.arrayBuffer());
+  const ws = wb.worksheets.find(w => w.name.startsWith('Detail'));
+  const out = [];
+  ws.eachRow((row, n) => {
+    if (n < 6) return;
+    const v = (c) => { const x = row.getCell(c).value; return x && x.result !== undefined ? x.result : x; };
+    out.push({ row: n, kode: v(5), uraian: v(6), paguRKA: v(8), idPaket: v(15), namaPaket: v(16),
+               rupTerumumkan: v(17), selisih: v(18) });
+  });
+  window.__detail = out.filter(r => r.uraian || r.idPaket);
+  window.__done = true;
+};
+</script>
+<script src="../sirup_exporter.user.js"></script>
+</body>
+</html>

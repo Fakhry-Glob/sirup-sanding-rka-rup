@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      2.3
+// @version      2.4
 // @description  Crawl RKA dan RUP dari SiRUP, lalu ekspor jadi laporan sanding Excel (dashboard, ringkasan, sanding berjenjang, detail per program). Tahun anggaran & satker terdeteksi otomatis.
 // @author       Fakhry-Glob
 // @match        https://sirup.inaproc.id/sirup/*
@@ -17,7 +17,7 @@
 
     // ═════════════════════════════════════════════════════════ KONFIGURASI ══
     const APP_TITLE = 'Sanding RKA & RUP';
-    const APP_VERSION = '2.3';
+    const APP_VERSION = '2.4';
 
     // Konteks runtime: diisi otomatis oleh detectContext(), bisa dikoreksi
     // pengguna lewat panel pra-ekspor sebelum crawling dimulai.
@@ -2446,6 +2446,7 @@
                                             allocated_pagu: 0,
                                             matched_ids: [],
                                             matched_names: [],
+                                            cross_akun: false,
                                             is_draft_match: false
                                         });
                                     }
@@ -2470,71 +2471,155 @@
                                 }
                             }
                             
-                            // Perform Proportional Allocation for each unique Akun key
+                            // ── ALOKASI PAKET KE BARIS RKA ──────────────────────────
+                            //
+                            // Isi berurutan: tiap baris RKA menyerap min(sisa baris,
+                            // sisa paket); paket yang masih bersisa mengalir ke baris
+                            // berikutnya. Satu paket boleh menutup beberapa baris, dan
+                            // tiap baris menampilkan porsinya sendiri.
+                            //
+                            // Sebuah baris TIDAK PERNAH menerima lebih dari pagunya.
+                            // Versi lama menumpahkan seluruh sisa paket ke baris pertama
+                            // tiap akun, sehingga baris pagu 45.500.000 bisa tampil
+                            // 377.999.808 dan kolom Selisih-nya tidak berarti apa-apa.
+                            const excess_by_key = new Map();
+
+                            function fillRows(rows, pools, crossAkun) {
+                                for (const d_obj of rows) {
+                                    let needed = d_obj.pagu - d_obj.allocated_pagu;
+                                    if (needed <= 0) continue;
+                                    for (const pool of pools) {
+                                        if (needed <= 0) break;
+                                        if (pool.remaining_pagu <= 0) continue;
+                                        const amount = Math.min(needed, pool.remaining_pagu);
+                                        pool.remaining_pagu -= amount;
+                                        d_obj.allocated_pagu += amount;
+                                        needed -= amount;
+                                        // id & nama didorong berpasangan; kalau dicek
+                                        // terpisah, dua paket bernama sama membuat kedua
+                                        // daftar itu tidak lagi sejajar.
+                                        if (!d_obj.matched_ids.includes(pool.packet_id)) {
+                                            d_obj.matched_ids.push(pool.packet_id);
+                                            d_obj.matched_names.push(pool.packet_name);
+                                        }
+                                        if (crossAkun) d_obj.cross_akun = true;
+                                    }
+                                }
+                            }
+
+                            // Tahap 1 — cocok persis 7 ruas (MAK paket = MAK baris RKA).
                             const unique_keys = new Set(detail_row_objects.map(d => d.key));
                             for (const k of unique_keys) {
+                                fillRows(
+                                    detail_row_objects.filter(d => d.key === k),
+                                    rup_pools_terumumkan.filter(p => p.key === k),
+                                    false
+                                );
+                            }
+
+                            // Tahap 2 — luber lintas akun, masih di dalam komponen ini.
+                            // Satu kontrak outsourcing lazimnya menutup honor, jaminan
+                            // ketenagakerjaan, dan jaminan kesehatan sekaligus: tiga akun
+                            // berbeda. Tanpa tahap ini sisanya tidak punya tempat.
+                            const spill_pools = rup_pools_terumumkan.filter(p => p.remaining_pagu > 0);
+                            if (spill_pools.length > 0) {
+                                fillRows(detail_row_objects, spill_pools, true);
+                            }
+
+                            // Tahap 3 — sisa yang benar-benar melampaui pagu RKA komponen.
+                            // Dicatat per akun asal paket, lalu ditulis sebagai barisnya
+                            // sendiri supaya Detail tetap rekonsiliasi dengan subtotal.
+                            for (const pool of rup_pools_terumumkan) {
+                                if (pool.remaining_pagu <= 0) continue;
+                                if (!excess_by_key.has(pool.key)) {
+                                    excess_by_key.set(pool.key, { total: 0, ids: [], names: [] });
+                                }
+                                const e = excess_by_key.get(pool.key);
+                                e.total += pool.remaining_pagu;
+                                if (!e.ids.includes(pool.packet_id)) {
+                                    e.ids.push(pool.packet_id);
+                                    e.names.push(pool.packet_name);
+                                }
+                                pool.remaining_pagu = 0;
+                            }
+
+                            // Tahap 4 — baris yang masih kurang ditautkan ke paket
+                            // draft/batal sebagai peringatan (tidak menambah realisasi).
+                            for (const k of unique_keys) {
                                 const k_rka_rows = detail_row_objects.filter(d => d.key === k);
-                                const k_rup_pools_ter = rup_pools_terumumkan.filter(p => p.key === k);
                                 const k_rup_pools_drf = rup_pools_draft.filter(p => p.key === k);
-                                
-                                // 1. First Pass: Allocate Terumumkan RUP
                                 for (const d_obj of k_rka_rows) {
-                                    let needed = d_obj.pagu;
-                                    for (const pool of k_rup_pools_ter) {
-                                        if (pool.remaining_pagu > 0 && needed > 0) {
-                                            const amount = Math.min(needed, pool.remaining_pagu);
-                                            pool.remaining_pagu -= amount;
-                                            d_obj.allocated_pagu += amount;
-                                            needed -= amount;
-                                            
-                                            if (!d_obj.matched_ids.includes(pool.packet_id)) {
-                                                d_obj.matched_ids.push(pool.packet_id);
-                                            }
-                                            if (!d_obj.matched_names.includes(pool.packet_name)) {
-                                                d_obj.matched_names.push(pool.packet_name);
-                                            }
+                                    if (d_obj.allocated_pagu >= d_obj.pagu) continue;
+                                    for (const pool of k_rup_pools_drf) {
+                                        if (pool.remaining_pagu <= 0) continue;
+                                        d_obj.is_draft_match = true;
+                                        const drf_id = `[DRAFT/BATAL] ${pool.packet_id}`;
+                                        if (!d_obj.matched_ids.includes(drf_id)) {
+                                            d_obj.matched_ids.push(drf_id);
+                                            d_obj.matched_names.push(`[Draft/Batal] ${pool.packet_name}`);
                                         }
+                                        pool.remaining_pagu = 0; // sudah dipakai sebagai catatan
                                     }
                                 }
-                                
-                                // Leftover Terumumkan RUP goes to the first RKA row
-                                const leftover = k_rup_pools_ter.reduce((sum, p) => sum + p.remaining_pagu, 0);
-                                if (leftover > 0 && k_rka_rows.length > 0) {
-                                    const first_row = k_rka_rows[0];
-                                    first_row.allocated_pagu += leftover;
-                                    for (const pool of k_rup_pools_ter) {
-                                        if (pool.remaining_pagu > 0) {
-                                            if (!first_row.matched_ids.includes(pool.packet_id)) {
-                                                first_row.matched_ids.push(pool.packet_id);
-                                            }
-                                            if (!first_row.matched_names.includes(pool.packet_name)) {
-                                                first_row.matched_names.push(pool.packet_name);
-                                            }
-                                            pool.remaining_pagu = 0;
-                                        }
+                            }
+
+                            // Di mana tiap akun berakhir, supaya baris kelebihan bisa
+                            // diselipkan tepat di bawah baris detail terakhirnya.
+                            const last_l3_by_key = new Map();
+                            {
+                                let sk = "", ak = "";
+                                for (let i = 0; i < komp_rows.length; i++) {
+                                    const rr = komp_rows[i];
+                                    if (rr.level === 1) sk = rr.code;
+                                    else if (rr.level === 2) ak = rr.code;
+                                    else if (rr.level === 3) {
+                                        last_l3_by_key.set(
+                                            `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}.${sk}.${ak}`, i);
                                     }
                                 }
-                                
-                                // 2. Second Pass: Link remaining unmatched RKA rows to Draft RUPs (warnings)
-                                for (const d_obj of k_rka_rows) {
-                                    if (d_obj.allocated_pagu < d_obj.pagu) {
-                                        for (const pool of k_rup_pools_drf) {
-                                            if (pool.remaining_pagu > 0) {
-                                                d_obj.is_draft_match = true;
-                                                const drf_id = `[DRAFT/BATAL] ${pool.packet_id}`;
-                                                const drf_name = `[Draft/Batal] ${pool.packet_name}`;
-                                                
-                                                if (!d_obj.matched_ids.includes(drf_id)) {
-                                                    d_obj.matched_ids.push(drf_id);
-                                                }
-                                                if (!d_obj.matched_names.includes(drf_name)) {
-                                                    d_obj.matched_names.push(drf_name);
-                                                }
-                                                pool.remaining_pagu = 0; // mark as matched
-                                            }
-                                        }
+                            }
+                            const excess_written = new Set();
+
+                            // Ruas ke-n dari kunci 7 ruas (5 = sub-komponen, 6 = akun).
+                            const segOf = (key, n) => String(key).split(".")[n];
+                            const sumAllocated = (pred) => detail_row_objects
+                                .filter(pred).reduce((t, d) => t + d.allocated_pagu, 0);
+                            const sumExcess = (pred) => {
+                                let t = 0;
+                                excess_by_key.forEach((e, k) => { if (pred(k)) t += e.total; });
+                                return t;
+                            };
+
+                            // Menulis satu baris "RUP melebihi pagu RKA".
+                            function writeExcessRow(key) {
+                                const e = excess_by_key.get(key);
+                                if (!e || e.total <= 0 || excess_written.has(key)) return;
+                                excess_written.add(key);
+
+                                ws.getCell(curr_row, 6).value =
+                                    'RUP melebihi pagu RKA — tidak ada baris RKA yang menampung sisa paket ini';
+                                ws.getCell(curr_row, 15).value = e.ids.join(", ");
+                                ws.getCell(curr_row, 16).value = e.names.join(", ");
+                                ws.getCell(curr_row, 17).value = e.total;
+                                ws.getCell(curr_row, 17).numFmt = '#,##0';
+                                ws.getCell(curr_row, 18).value = -e.total;
+                                ws.getCell(curr_row, 18).numFmt = '#,##0';
+
+                                for (let c = 5; c <= 19; c++) {
+                                    const cell = ws.getCell(curr_row, c);
+                                    cell.fill = solid(LIGHT_ORANGE);
+                                    cell.border = border_thin;
+                                    cell.font = { name: FONT, size: 9, italic: true, bold: c === 17,
+                                                  color: { argb: 'FFC95D00' } };
+                                    if (c === 6 || c === 16) {
+                                        cell.alignment = { horizontal: 'left', vertical: 'middle', indent: 6, wrapText: true };
+                                    } else if (c === 17 || c === 18) {
+                                        cell.alignment = { horizontal: 'right', vertical: 'middle' };
+                                    } else {
+                                        cell.alignment = { horizontal: 'center', vertical: 'middle' };
                                     }
                                 }
+                                curr_row++;
                             }
 
                             // --- ITERATE AND WRITE ROWS ---
@@ -2591,12 +2676,21 @@
                                 let matched_pkt_waktu = "";
                                 
                                 if (level === 0) {
+                                    // Komponen tetap memakai jumlah mentah semua baris MAK,
+                                    // supaya angkanya sama persis dengan sheet Sanding.
                                     rup_pagu_val = comp_rup_lines.filter(l => l.is_terumumkan).reduce((sum, l) => sum + l.pagu, 0);
                                 } else if (level === 1) {
-                                    rup_pagu_val = comp_rup_lines.filter(l => l.subkomp === subkomp_code && l.is_terumumkan).reduce((sum, l) => sum + l.pagu, 0);
+                                    // Sub-komponen & akun memakai jumlah HASIL ALOKASI, bukan
+                                    // jumlah menurut MAK. Setelah paket boleh luber lintas
+                                    // akun, jumlah menurut MAK tidak lagi cocok dengan baris
+                                    // detail di bawahnya — akun penerima luberan akan tampil
+                                    // 0 padahal barisnya terisi.
+                                    rup_pagu_val = sumAllocated(d => segOf(d.key, 5) === subkomp_code)
+                                                 + sumExcess(k => segOf(k, 5) === subkomp_code);
                                 } else if (level === 2) {
                                     const akun_key = `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}.${subkomp_code}.${code}`;
-                                    rup_pagu_val = comp_rup_lines.filter(l => l.key === akun_key && l.is_terumumkan).reduce((sum, l) => sum + l.pagu, 0);
+                                    rup_pagu_val = sumAllocated(d => d.key === akun_key)
+                                                 + sumExcess(k => k === akun_key);
                                 } else if (level === 3) {
                                     const is_np = rows_is_np[row_idx_in_comp] || false;
                                     const is_gj = rows_is_gj[row_idx_in_comp] || false;
@@ -2612,7 +2706,8 @@
                                         const d_obj = detail_row_objects.find(d => d.r_idx === row_idx_in_comp);
                                         if (d_obj && d_obj.matched_ids && d_obj.matched_ids.length > 0) {
                                             matched_pkt_id = d_obj.matched_ids.join(", ");
-                                            matched_pkt_name = d_obj.matched_names.join(", ");
+                                            matched_pkt_name = d_obj.matched_names.join(", ")
+                                                + (d_obj.cross_akun ? "  [sebagian dari paket berakun lain]" : "");
                                             rup_pagu_val = d_obj.allocated_pagu;
                                             is_draft = d_obj.is_draft_match;
                                             
@@ -2711,8 +2806,20 @@
                                     }
                                 }
                                 curr_row++;
+
+                                // Kelebihan RUP akun ini ditulis persis setelah baris
+                                // detail terakhirnya, bukan ditumpahkan ke baris pertama.
+                                if (level === 3) {
+                                    const akey = `${prog_code}.${keg.code}.${out.code}.${ro.code}.${komp.code}.${subkomp_code}.${akun_code}`;
+                                    if (last_l3_by_key.get(akey) === row_idx_in_comp) writeExcessRow(akey);
+                                }
                             }
-                            
+
+                            // Akun yang tidak punya baris detail sama sekali di komponen
+                            // ini (mis. seluruh barisnya non-pengadaan) tetap harus
+                            // memunculkan kelebihannya.
+                            for (const k of Array.from(excess_by_key.keys())) writeExcessRow(k);
+
                             const end_row = curr_row - 1;
                             if (end_row >= start_row) {
                                 ws.getCell(start_row, 1).value = keg_text;

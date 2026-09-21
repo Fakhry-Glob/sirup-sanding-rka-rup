@@ -71,8 +71,40 @@ cetak A4 fit-to-width dengan header berulang.
 - Hanya paket berstatus **A + FD + U** (draft PPK, final draft, dan sudah
   diumumkan KPA) yang dihitung sebagai realisasi RUP. Paket draft/batal tetap
   ditampilkan sebagai peringatan berwarna oranye.
-- Satu paket RUP yang menutup beberapa baris RKA dialokasikan **proporsional**;
-  sisa alokasi jatuh ke baris pertama pada kunci akun yang sama.
+### Alokasi paket ke baris RKA
+
+Baris RKA diisi berurutan; tiap baris menyerap `min(sisa pagu baris, sisa pagu
+paket)`, dan paket yang masih bersisa mengalir ke baris berikutnya. Satu paket
+boleh menutup beberapa baris, dan **tiap baris menampilkan porsinya sendiri**:
+
+| Baris RKA | Pagu RKA | Paket | Porsi |
+|---|---:|---|---:|
+| Pagu A | 30.000.000 | Paket A1 | 12.000.000 |
+|  |  | Paket A2 | 18.000.000 |
+| Pagu B | 20.000.000 | Paket B1 | 7.000.000 |
+|  |  | Paket B2 | 13.000.000 |
+| Pagu C | 10.000.000 | Paket B2 | 10.000.000 |
+
+Paket B2 berpagu 23.000.000 dan terbelah ke dua baris. Urutannya tiga tahap:
+
+1. **Cocok persis 7 ruas** — MAK paket sama dengan MAK baris RKA.
+2. **Luber lintas akun, dalam komponen yang sama.** Satu kontrak outsourcing
+   lazimnya menutup honor, jaminan ketenagakerjaan, dan jaminan kesehatan
+   sekaligus — tiga akun berbeda. Baris yang terisi dari tahap ini ditandai
+   *"[sebagian dari paket berakun lain]"* pada kolom nama paket.
+3. **Sisa yang benar-benar melebihi pagu** mendapat barisnya sendiri berwarna
+   oranye: *"RUP melebihi pagu RKA — tidak ada baris RKA yang menampung"*,
+   lengkap dengan ID paketnya.
+
+**Sebuah baris tidak pernah menerima lebih dari pagunya.** Sampai v2.3 seluruh
+sisa paket ditumpahkan ke baris pertama tiap akun, sehingga baris berpagu
+45.500.000 bisa tampil 45.500.000 → 377.999.808 dan kolom Selisih-nya tidak
+berarti apa-apa. Subtotal sub-komponen & akun ikut memakai angka hasil alokasi,
+bukan jumlah menurut MAK, supaya baris detail selalu berjumlah sama dengan
+subtotal di atasnya.
+
+Angka di **Dashboard** dan **Sanding RKA & RUP** tidak terpengaruh perubahan ini
+— keduanya dijumlah langsung dari baris MAK, bukan dari hasil alokasi.
 
 ## Kontrol silang angka RUP
 
@@ -146,6 +178,12 @@ Yang sengaja disiapkan di dalamnya:
 
 Ubah `TOTAL_PACKETS` dan `FAILING_DETAILS` di bagian atas file untuk menguji
 skenario lain.
+
+`dev/harness-alokasi.html` khusus menguji alokasi paket ke baris RKA dengan data
+kecil yang bisa dihitung tangan (kasus Pagu A/B/C di atas, termasuk Paket B2 yang
+terbelah lintas akun). Halaman ini membaca ulang file Excel hasilnya dan menaruh
+isi sheet Detail di `window.__detail`, jadi angkanya bisa diperiksa langsung dari
+console. Tambahkan `?excess=1` untuk memunculkan kasus RUP melebihi pagu.
 
 Untuk menguji pembentukan Excel tanpa membuka SiRUP, jalankan `buildExcel()` di
 Node dengan ExcelJS asli dan data sintetis (stub `document`, `Blob`, dan `saveAs`),
