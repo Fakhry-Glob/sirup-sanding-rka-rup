@@ -49,7 +49,22 @@ cetak A4 fit-to-width dengan header berulang.
 ## Cara penyandingan bekerja
 
 - **Kunci penyandingan** adalah MAK 7 ruas: `program.kegiatan.KRO.RO.komponen.subkomponen.akun`.
-  MAK dari RUP dinormalkan dulu (bentuk 9 ruas berawalan tahun & kode satker juga diterima).
+  MAK dari RUP dinormalkan dulu. SiRUP memakai dua bentuk, dan **panjangnya tidak
+  bisa dipakai membedakan** — awalan `tahun.kode satker` dikenali dari ruas pertama
+  yang berupa tahun 4 digit, bukan dari jumlah ruas:
+
+  | Sumber | Contoh nyata | Hasil |
+  |---|---|---|
+  | Tabel detail paket | `WA.2378.EBA.994.002.AD.521811` | 7 ruas polos, dipakai menyanding |
+  | Kolom daftar paket | `2026.14564.WA.2378.EBA.994.002.AD.521811` | awalan dibuang → 7 ruas |
+  | Kolom daftar paket | `2026.14564.DL.2376.FAN.ZZ1.ZZ1` | awalan dibuang → sisa 5 ruas: **MAK belum lengkap** |
+
+  Bentuk ketiga itu juga 7 ruas. Sebelum v2.3 awalannya tidak dibuang, jadi program
+  terbaca `2026` dan kegiatan `14564` — paketnya dilaporkan "anggaran dihapus atau
+  salah input", padahal sebenarnya MAK-nya baru terisi sampai level KRO/RO.
+  Sekarang sebabnya disebut apa adanya di sheet *Paket RUP Tanpa Sandingan*.
+
+  `ZZ1` adalah penanda SAKTI untuk RO/komponen yang belum ditentukan.
 - **Non-pengadaan** (centang NP / Gaji) dikeluarkan dari target. Centang di level
   komponen, sub-komponen, atau akun **diturunkan** ke seluruh baris detail di bawahnya.
 - **Target pengadaan** = pagu RKA − belanja non-pengadaan.

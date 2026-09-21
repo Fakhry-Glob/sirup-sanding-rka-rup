@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.3
 // @description  Crawl RKA dan RUP dari SiRUP, lalu ekspor jadi laporan sanding Excel (dashboard, ringkasan, sanding berjenjang, detail per program). Tahun anggaran & satker terdeteksi otomatis.
 // @author       Fakhry-Glob
 // @match        https://sirup.inaproc.id/sirup/*
@@ -17,7 +17,7 @@
 
     // ═════════════════════════════════════════════════════════ KONFIGURASI ══
     const APP_TITLE = 'Sanding RKA & RUP';
-    const APP_VERSION = '2.2';
+    const APP_VERSION = '2.3';
 
     // Konteks runtime: diisi otomatis oleh detectContext(), bisa dikoreksi
     // pengguna lewat panel pra-ekspor sebelum crawling dimulai.
@@ -765,26 +765,30 @@
         return false;
     }
 
-    // Robust MAK parser
+    // Buang awalan "tahun.kode satker" kalau ada.
+    //
+    // SiRUP memakai dua bentuk MAK dan panjangnya TIDAK bisa dipakai untuk
+    // membedakan. Contoh nyata dari satker 14564 TA 2026:
+    //
+    //   detail paket : WA.2378.EBA.994.002.AD.521811        -> 7 ruas, polos
+    //   daftar paket : 2026.14564.DL.2376.FAN.ZZ1.ZZ1       -> 7 ruas, berawalan
+    //   daftar paket : 2026.14564.WA.2378.EBA.994.002.AD.521811 -> 9 ruas, berawalan
+    //
+    // Kode lama hanya membuang awalan kalau ruasnya >= 9, jadi bentuk kedua
+    // terbaca sebagai MAK polos: program menjadi "2026" dan kegiatan "14564".
+    // Kunci hasilnya tidak akan pernah cocok dengan RKA mana pun.
+    function stripMakPrefix(parts) {
+        if (parts.length >= 7 && /^20\d{2}$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
+            return parts.slice(2);
+        }
+        return parts;
+    }
+
+    // Robust MAK parser. Mengembalikan null kalau MAK belum lengkap sampai akun.
     function parseMak(mak) {
         if (!mak) return null;
-        mak = mak.toString().replace(/\s+/g, "").trim();
-        const parts = mak.split(".");
-        // 9 parts (Tahun.Satker.Prog.Keg.KRO.RO.Komp.Subkomp.Akun)
-        if (parts.length >= 9 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
-            return {
-                prog: parts[2],
-                keg: parts[3],
-                out: parts[4],
-                ro: parts[5],
-                komp: parts[6],
-                subkomp: parts[7],
-                akun: parts[8],
-                comp_key: `${parts[2]}.${parts[3]}.${parts[4]}.${parts[5]}.${parts[6]}`,
-                key: `${parts[2]}.${parts[3]}.${parts[4]}.${parts[5]}.${parts[6]}.${parts[7]}.${parts[8]}`
-            };
-        }
-        // 7 parts (Prog.Keg.KRO.RO.Komp.Subkomp.Akun)
+        const parts = stripMakPrefix(mak.toString().replace(/\s+/g, "").trim().split("."));
+        // Prog.Keg.KRO.RO.Komp.Subkomp.Akun
         if (parts.length >= 7) {
             return {
                 prog: parts[0],
@@ -799,6 +803,20 @@
             };
         }
         return null;
+    }
+
+    // Kenapa sebuah MAK gagal diurai — supaya sheet "Tanpa Sandingan" bisa
+    // menyebut sebab yang benar, bukan menuduh anggarannya dihapus.
+    function makProblem(mak) {
+        const raw = (mak == null ? '' : String(mak)).replace(/\s+/g, "").trim();
+        if (!raw) return "Kode MAK kosong di RUP";
+        const parts = stripMakPrefix(raw.split("."));
+        if (parts.length >= 2 && parts.length < 7) {
+            return `MAK belum lengkap — baru terisi ${parts.length} ruas ` +
+                   '(butuh 7: program.kegiatan.KRO.RO.komponen.subkomponen.akun). ' +
+                   'Lengkapi MAK paket ini di SiRUP.';
+        }
+        return "Format Kode MAK di RUP tidak valid";
     }
 
     function parseRkaTable(html) {
@@ -1451,7 +1469,7 @@
                         packet_name: p.name,
                         mak: p.mak || "(Kosong)",
                         pagu: p.pagu,
-                        reason: "Format Kode MAK di RUP tidak valid atau kosong"
+                        reason: makProblem(p.mak)
                     });
                 }
             }

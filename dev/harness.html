@@ -33,8 +33,8 @@
   <label for="idProgram">Program</label>
   <select id="idProgram">
     <option value=""></option>
-    <option value="P1">[032.12.DA] Program Kualitas SDM Kelautan</option>
-    <option value="P2">[032.12.GG] Program Dukungan Manajemen</option>
+    <option value="2775572">[DL] Program Pendidikan dan Pelatihan Vokasi</option>
+    <option value="2775573">[WA] Program Dukungan Manajemen</option>
   </select>
 
   <div id="mode">
@@ -63,9 +63,9 @@ function rkaTable(seed) {
                             : '<i class="glyphicon glyphicon-remove"></i>';
   return `<table><tr><th>Kode</th><th>Uraian</th><th>Prev</th><th>Pagu</th><th>PaguPrev</th>
     <th>P</th><th>S</th><th>MY</th><th>NP</th><th>GJ</th></tr>
-    <tr class="komponenTr"><td>051</td><td>Komponen ${seed}</td><td></td><td>500.000.000</td><td>-</td>
+    <tr class="komponenTr"><td>${seed === 0 ? '001' : (seed === 1 ? '101' : '102')}</td><td>Komponen ${seed}</td><td></td><td>500.000.000</td><td>-</td>
       <td></td><td></td><td></td><td>${np}</td><td><i class="glyphicon glyphicon-remove"></i></td></tr>
-    <tr class="subKomponenTr"><td>A</td><td>Sub ${seed}</td><td></td><td>500.000.000</td><td>-</td>
+    <tr class="subKomponenTr"><td>0A</td><td>Sub Komponen</td><td></td><td>500.000.000</td><td>-</td>
       <td></td><td></td><td></td><td></td><td></td></tr>
     <tr class="akunTr"><td>521211</td><td>Belanja Bahan</td><td></td><td>500.000.000</td><td>-</td>
       <td></td><td></td><td></td><td></td><td></td></tr>
@@ -76,11 +76,15 @@ function rkaTable(seed) {
   </table>`;
 }
 
+// MAK bentuk polos 7 ruas — inilah yang benar-benar dipakai menyanding,
+// persis seperti yang dikirim SiRUP di tabel detail paket.
+const DETAIL_MAK = 'DL.2375.SCC.831.101.0A.521211';
+
 function packetDetail(i) {
   return `<html><body><table>
     <tr><th>No</th><th>Uraian</th><th>Jenis</th><th>Sumber Dana</th><th>MAK</th><th>Pagu</th></tr>
     <tr><td>1.</td><td>x</td><td>y</td><td>APBN</td>
-        <td>032.12.DA.1234.QDB.051.A.521211</td><td>Rp. ${(1000000 + i * 137).toLocaleString('id-ID')}</td></tr>
+        <td>${DETAIL_MAK}</td><td>Rp. ${(1000000 + i * 137).toLocaleString('id-ID')}</td></tr>
   </table></body></html>`;
 }
 
@@ -90,19 +94,24 @@ window.fetch = async function (url, opts) {
   const body = (opts && opts.body) || '';
 
   if (u.includes('daftarkegiatanbyprogram'))
-    return json([{ id: 'K1', nama: 'Kegiatan Pelatihan', kode_kegiatans: '1234' },
-                 { id: 'K2', nama: 'Kegiatan Sertifikasi', kode_kegiatans: '1235' },
-                 { id: 'K3', nama: 'Kegiatan Dukungan', kode_kegiatans: '1236' }], 140);
+    return json([{ id: 'K1', nama: 'Kegiatan Pelatihan Vokasi', kode_kegiatans: '2375' },
+                 { id: 'K2', nama: 'Kegiatan Sertifikasi', kode_kegiatans: '2376' },
+                 { id: 'K3', nama: 'Kegiatan Dukungan Manajemen', kode_kegiatans: '2378' }], 140);
 
   if (u.includes('daftaroutputbykegiatan'))
-    return json([{ id: 'O1', nama: 'Output SDM', kode_output_string: 'QDB' }], 60);
+    return json([{ id: 'O1', nama: 'Output SDM Vokasi', kode_output_string: 'SCC' }], 60);
 
   if (u.includes('daftarsuboutputbyoutput'))
-    return json([{ id: 'R1', nama: 'RO Pelatihan', kode_suboutput_string: '051' }], 60);
+    return json([{ id: 'R1', nama: 'RO Pelatihan', kode_suboutput_string: '831' }], 60);
 
   if (u.includes('daftarkomponenbysuboutput'))
-    return json(Array.from({ length: 6 }, (_, i) =>
-      ({ id: 'C' + i, nama: 'Komponen ' + i, kode_komponen_string: '05' + i, pagu: 500000000 })), 60);
+    // tiga komponen: hanya yang pertama ditandai non-pengadaan (glyphicon),
+    // supaya target pengadaan tidak habis dan capaian bisa diperiksa
+    return json([
+      { id: 'C0', nama: 'Komponen Gaji',        kode_komponen_string: '001', pagu: 500000000 },
+      { id: 'C1', nama: 'Komponen Pelaksanaan', kode_komponen_string: '101', pagu: 500000000 },
+      { id: 'C2', nama: 'Komponen Dukungan',    kode_komponen_string: '102', pagu: 500000000 }
+    ], 60);
 
   if (u.includes('rkakontentable2018')) {
     const m = u.match(/idKomponen=C(\d+)/);
@@ -119,7 +128,12 @@ window.fetch = async function (url, opts) {
                   'Januari', 'APBN',
                   '<input type="checkbox" checked>', '<input type="checkbox" checked>',
                   i % 7 === 0 ? '<input type="checkbox">' : '<input type="checkbox" checked>',
-                  '', '', '', '', '032.12.DA.1234.QDB.051.A.521211' ]);
+                  '', '', '', '',
+                  // Kolom daftar memakai awalan tahun+satker, dan sering hanya
+                  // sampai level komponen. Bentuk inilah yang dulu terbaca
+                  // sebagai program "2026".
+                  i % 5 === 0 ? '2026.14564.DL.2375.SCC.831.101'
+                              : '2026.14564.' + DETAIL_MAK ]);
     }
     return json({ aaData: rows, iTotalDisplayRecords: TOTAL_PACKETS, iTotalRecords: TOTAL_PACKETS }, 120);
   }
