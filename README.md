@@ -76,10 +76,27 @@ ke komponen RKA. Ketiganya seharusnya sama.
 - **Paket swakelola belum ikut disandingkan.** Jumlahnya dilaporkan sebagai
   catatan di log, tapi tidak masuk perhitungan.
 - Butuh sesi login SiRUP yang aktif; script tidak melakukan autentikasi sendiri.
+  Kalau sesi habis di tengah jalan, proses berhenti dengan pesan jelas — bukan
+  menghasilkan laporan berisi nol.
 - Deteksi tahun anggaran & nama satker mengandalkan struktur halaman SiRUP. Kalau
   SiRUP mengubah markup-nya, nilai itu bisa meleset — makanya keduanya bisa
   dikoreksi manual di panel sebelum ekspor.
-- Pengambilan detail paket dibatasi 1.000 paket per satker per tahun.
+- Daftar paket ditarik per halaman 1.000 sampai habis, dengan pagar 20.000 paket
+  per satker per tahun. Kalau pagar itu kena, log menandainya sebagai peringatan
+  merah.
+
+## Kalau ada yang gagal ditarik
+
+Kegagalan jaringan per paket tidak lagi lewat diam-diam. Panel log memunculkan
+peringatan merah dan menyebut berapa banyak yang gagal:
+
+- **tabel komponen RKA gagal ditarik** → rincian detail komponen itu kosong,
+  jadi non-pengadaan dan sandingan detailnya ikut salah;
+- **detail paket RUP gagal ditarik** → pagu paket itu tidak masuk realisasi,
+  sehingga capaian terlihat lebih rendah dari seharusnya.
+
+Dua-duanya berarti hal yang sama: ulangi ekspor sebelum angkanya dipakai untuk
+monev.
 
 ## Pengembangan
 

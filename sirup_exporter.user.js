@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  Crawl RKA dan RUP dari SiRUP, lalu ekspor jadi laporan sanding Excel (dashboard, ringkasan, sanding berjenjang, detail per program). Tahun anggaran & satker terdeteksi otomatis.
 // @author       Fakhry-Glob
 // @match        https://sirup.inaproc.id/sirup/*
@@ -17,7 +17,7 @@
 
     // ═════════════════════════════════════════════════════════ KONFIGURASI ══
     const APP_TITLE = 'Sanding RKA & RUP';
-    const APP_VERSION = '2.1';
+    const APP_VERSION = '2.2';
 
     // Konteks runtime: diisi otomatis oleh detectContext(), bisa dikoreksi
     // pengguna lewat panel pra-ekspor sebelum crawling dimulai.
@@ -501,6 +501,28 @@
     }
 
     // Helper Functions
+    // Sesi SiRUP yang kedaluwarsa tidak membalas 401 — server mengirim halaman
+    // login dengan status 200. Tanpa pemeriksaan ini crawling tetap jalan dan
+    // menghasilkan laporan berisi nol, bukan error.
+    function looksLikeLoginPage(text) {
+        if (!text) return false;
+        const head = text.slice(0, 4000).toLowerCase();
+        return head.includes('name="password"')
+            || head.includes('id="password"')
+            || head.includes('/sirup/home/login')
+            || head.includes('silakan login');
+    }
+
+    function assertOk(res, url) {
+        if (!res.ok) {
+            throw new Error('Server menolak permintaan (HTTP ' + res.status + ') untuk ' + url +
+                            '. Coba muat ulang halaman SiRUP lalu ulangi ekspor.');
+        }
+    }
+
+    const ERR_SESSION = 'Sesi login SiRUP sudah habis. Login ulang di tab lain, ' +
+                        'muat ulang halaman ini, lalu jalankan ekspor lagi.';
+
     async function postForm(url, body) {
         const res = await fetch(url, {
             method: "POST",
@@ -508,40 +530,57 @@
                 "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                 "X-Requested-With": "XMLHttpRequest"
             },
-            body: body
+            body: body,
+            credentials: 'same-origin'
         });
-        return res.json();
+        assertOk(res, url);
+        const text = await res.text();
+        if (looksLikeLoginPage(text)) throw new Error(ERR_SESSION);
+        try {
+            return JSON.parse(text);
+        } catch (e) {
+            throw new Error('Balasan server untuk ' + url + ' bukan JSON yang sah. ' +
+                            'Kemungkinan struktur SiRUP berubah atau sesi bermasalah.');
+        }
     }
 
     async function getText(url) {
-        const res = await fetch(url);
-        return res.text();
+        const res = await fetch(url, { credentials: 'same-origin' });
+        assertOk(res, url);
+        const text = await res.text();
+        if (looksLikeLoginPage(text)) throw new Error(ERR_SESSION);
+        return text;
     }
 
     // Helper for batched concurrent execution
+    // Kegagalan per item tidak menghentikan batch, tapi DIHITUNG dan
+    // dikembalikan lewat results.failures. Sebelumnya error ditelan diam-diam
+    // sehingga paket yang gagal ditarik hilang dari realisasi RUP tanpa jejak.
     async function mapConcurrent(items, concurrency, fn) {
         const results = [];
-        const copy = [...items];
+        const failures = [];
         let index = 0;
-        
+
         async function worker() {
-            while (index < copy.length) {
+            while (index < items.length) {
                 const currentIdx = index++;
-                const item = copy[currentIdx];
+                if (abortRequested) return;
                 try {
-                    results[currentIdx] = await fn(item, currentIdx, items.length);
+                    results[currentIdx] = await fn(items[currentIdx], currentIdx, items.length);
                 } catch (err) {
                     results[currentIdx] = null;
+                    if (!abortRequested) failures.push({ index: currentIdx, item: items[currentIdx], err });
                     console.error(`Error processing item at index ${currentIdx}:`, err);
                 }
             }
         }
-        
-        const workers = Array(Math.min(concurrency, items.length))
+
+        const workers = Array(Math.max(1, Math.min(concurrency, items.length)))
             .fill(null)
             .map(() => worker());
-            
+
         await Promise.all(workers);
+        results.failures = failures;
         return results;
     }
 
@@ -626,11 +665,22 @@
             const paguPrevText = tds[4].innerText.trim().replace(/\./g, '');
             const paguPrev = paguPrevText === '-' ? '-' : parseInt(paguPrevText) || 0;
             
-            const p_ch = tds[5]?.querySelector('input')?.checked || false;
-            const s_ch = tds[6]?.querySelector('input')?.checked || false;
-            const my_ch = tds[7]?.querySelector('input')?.checked || false;
-            const np_ch = tds[8]?.querySelector('input')?.checked || false;
-            const gj_ch = tds[9]?.querySelector('input')?.checked || false;
+            // Sebagian role/satker menerima sel centang sebagai <input>, sebagian
+            // lagi sebagai ikon glyphicon. Membaca .checked saja membuat NP/Gaji
+            // terbaca false untuk role kedua — non-pengadaan jadi 0 dan capaian
+            // terlihat jauh lebih buruk daripada kenyataannya.
+            const cellChecked = (td) => {
+                if (!td) return false;
+                const input = td.querySelector('input');
+                if (input) return input.checked || input.hasAttribute('checked');
+                return parseCheckboxValue(td.innerHTML);
+            };
+
+            const p_ch = cellChecked(tds[5]);
+            const s_ch = cellChecked(tds[6]);
+            const my_ch = cellChecked(tds[7]);
+            const np_ch = cellChecked(tds[8]);
+            const gj_ch = cellChecked(tds[9]);
             
             rows.push({
                 level, code, desc, descPrev, pagu, paguPrev,
@@ -682,6 +732,7 @@
             }
             
             const rkaData = [];
+            let rkaFetchFailures = 0;
             let totalSteps = programs.length;
             let currentStep = 0;
             
@@ -710,19 +761,25 @@
                             // Crawl Komponens under RO
                             const komponens = await postForm('/sirup/selfservice/daftarkomponenbysuboutput', `idSubOutput=${ro.id}`);
                             
-                            // Fetch all component tables concurrently under this RO
-                            await Promise.all(komponens.map(async (komp) => {
+                            // Tarik tabel komponen paralel tapi TERBATAS, lalu simpan
+                            // sesuai urutan asli. Promise.all tanpa batas menembak
+                            // seluruh komponen sekaligus (server gampang menolak), dan
+                            // .push() di dalamnya membuat urutan baris laporan berubah
+                            // tiap kali ekspor dijalankan.
+                            const kompRows = await mapConcurrent(komponens, 6, async (komp) => {
                                 const tableHtml = await getText(`/sirup/rkactr/rkakontentable2018?idKomponen=${komp.id}`);
-                                const tableRows = parseRkaTable(tableHtml);
-                                
+                                return parseRkaTable(tableHtml);
+                            });
+                            rkaFetchFailures += (kompRows.failures || []).length;
+                            komponens.forEach((komp, i) => {
                                 roData.komponens.push({
                                     id: komp.id,
                                     name: komp.nama,
                                     code: komp.kode_komponen_string,
                                     pagu: komp.pagu,
-                                    rows: tableRows
+                                    rows: kompRows[i] || []
                                 });
-                            }));
+                            });
                             outData.suboutputs.push(roData);
                         }
                         kegData.outputs.push(outData);
@@ -732,17 +789,54 @@
                 rkaData.push(progData);
             }
             
+            if (rkaFetchFailures > 0) {
+                log('PERINGATAN: ' + rkaFetchFailures + ' tabel komponen RKA gagal ditarik. ' +
+                    'Rincian detail komponen tersebut kosong, sehingga non-pengadaan dan ' +
+                    'sandingan detailnya ikut salah — ulangi ekspor sebelum angkanya dipakai.',
+                    null, 'error');
+            }
             log('Pengambilan data RKA selesai!', 50);
 
             // 2. Crawl RUP Penyedia via Direct XHR
             log('Mengambil data RUP Paket Penyedia dari server...', 55);
             
-            let rupBody = 'draw=1&start=0&length=1000';
-            if (activeSatkerId) {
-                rupBody += `&idSatker=${activeSatkerId}&satker=${activeSatkerId}&id_satker=${activeSatkerId}`;
-            }
+            const RUP_PAGE_SIZE = 1000;
+            const RUP_MAX_PAGES = 20;   // batas aman 20.000 paket
+            const satkerBody = activeSatkerId
+                ? `&idSatker=${activeSatkerId}&satker=${activeSatkerId}&id_satker=${activeSatkerId}`
+                : '';
+            const rupBody = `draw=1&start=0&length=${RUP_PAGE_SIZE}${satkerBody}`;
+
             const rupRes = await postForm(`/sirup/datatablectr/dataruppenyedia2018?tahun=${ctx.tahun}`, rupBody);
             const rupRows = rupRes.aaData || [];
+
+            // Laporan sebelumnya diam-diam berhenti di 1.000 paket: sisanya hilang
+            // dari realisasi dan selisih terlihat jauh lebih besar dari seharusnya.
+            // Sekarang sisa halaman ditarik sampai habis.
+            const rupTotal = Number(
+                rupRes.iTotalDisplayRecords ?? rupRes.recordsFiltered ??
+                rupRes.iTotalRecords ?? rupRes.recordsTotal ?? rupRows.length
+            ) || rupRows.length;
+
+            if (rupTotal > rupRows.length) {
+                log(`Total paket penyedia ${rupTotal.toLocaleString('id-ID')} — menarik sisa halaman...`, 56);
+                let page = 1;
+                while (rupRows.length < rupTotal && page < RUP_MAX_PAGES) {
+                    throwIfAborted();
+                    const moreRes = await postForm(
+                        `/sirup/datatablectr/dataruppenyedia2018?tahun=${ctx.tahun}`,
+                        `draw=${page + 1}&start=${page * RUP_PAGE_SIZE}&length=${RUP_PAGE_SIZE}${satkerBody}`
+                    );
+                    const moreRows = moreRes.aaData || [];
+                    if (moreRows.length === 0) break;
+                    rupRows.push(...moreRows);
+                    page++;
+                }
+                if (rupRows.length < rupTotal) {
+                    log(`PERINGATAN: baru ${rupRows.length} dari ${rupTotal} paket yang berhasil ditarik. ` +
+                        'Angka realisasi RUP di laporan ini belum lengkap.', null, 'error');
+                }
+            }
 
             // Paket swakelola belum ikut disandingkan — hitung saja sebagai catatan
             try {
@@ -777,7 +871,7 @@
             const rupDetails = {};
             let fetchedCount = 0;
             
-            await mapConcurrent(rupPackets, 10, async (p) => {
+            const detailResults = await mapConcurrent(rupPackets, 10, async (p) => {
                 throwIfAborted();
                 const detailHtml = await getText(`/sirup/penyedia/${p.id}`);
                 const parser = new DOMParser();
@@ -819,9 +913,17 @@
                 }
             });
             
-            // mapConcurrent menelan error per item, jadi status batal diperiksa lagi
-            // di sini supaya laporan setengah jadi tidak ikut dibangun.
+            // Status batal diperiksa lagi di sini supaya laporan setengah jadi
+            // tidak ikut dibangun.
             throwIfAborted();
+
+            const detailFailures = (detailResults && detailResults.failures) || [];
+            if (detailFailures.length > 0) {
+                log('PERINGATAN: detail ' + detailFailures.length + ' dari ' + rupPackets.length +
+                    ' paket gagal ditarik. Pagu paket tersebut TIDAK masuk hitungan ' +
+                    'realisasi — ulangi ekspor sebelum laporan ini dipakai untuk monev.',
+                    null, 'error');
+            }
 
             log('Pemuatan data RKA & RUP selesai! Memproses penyandingan...', 85);
             
