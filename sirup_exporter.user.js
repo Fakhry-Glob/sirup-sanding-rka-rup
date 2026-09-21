@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SiRUP RKA & RUP Exporter & Sander
 // @namespace    http://tampermonkey.net/
-// @version      2.5
+// @version      2.6
 // @description  Crawl RKA dan RUP dari SiRUP, lalu ekspor jadi laporan sanding Excel (dashboard, ringkasan, sanding berjenjang, detail per program). Tahun anggaran & satker terdeteksi otomatis.
 // @author       Fakhry-Glob
 // @match        https://sirup.inaproc.id/sirup/*
@@ -17,7 +17,7 @@
 
     // ═════════════════════════════════════════════════════════ KONFIGURASI ══
     const APP_TITLE = 'Sanding RKA & RUP';
-    const APP_VERSION = '2.5';
+    const APP_VERSION = '2.6';
 
     // Konteks runtime: diisi otomatis oleh detectContext(), bisa dikoreksi
     // pengguna lewat panel pra-ekspor sebelum crawling dimulai.
@@ -2453,10 +2453,14 @@
                                     const pg = typeof r.pagu === 'number' ? r.pagu : 0;
                                     if (typeof r.paguPrev === 'number') {
                                         rv.prev += r.paguPrev;
-                                        if (r.paguPrev !== pg) rv.berubah = true;
-                                    } else if (pg > 0) {
-                                        rv.baru = true;   // baris belum ada sebelum revisi
+                                        // SiRUP menulis 0 — bukan "-" — untuk baris yang
+                                        // belum ada sebelum revisi. Tanpa dibedakan, baris
+                                        // baru akan berbunyi "sebelum revisi Rp 0".
+                                        if (r.paguPrev === 0 && pg > 0) rv.baru = true;
+                                        else if (r.paguPrev !== pg) rv.berubah = true;
                                     }
+                                    // paguPrev "-" berarti kolom pembandingnya kosong;
+                                    // itu bukan bukti revisi, jadi tidak disimpulkan apa pun.
                                     if (!is_np && !is_gj) {
                                         detail_row_objects.push({
                                             r_idx: r_idx,
@@ -2661,13 +2665,17 @@
                             function revisiNote(key) {
                                 const rv = revisi_by_key.get(key);
                                 if (!rv) return '';
-                                if (rv.berubah) {
+                                if (rv.berubah && rv.prev > 0) {
                                     return `  Catatan: pagu baris di akun ini BERUBAH saat revisi ` +
                                            `(sebelum revisi Rp ${rv.prev.toLocaleString('id-ID')}) — ` +
                                            `kemungkinan besar RUP belum disesuaikan.`;
                                 }
                                 if (rv.baru) {
-                                    return '  Catatan: baris di akun ini BARU muncul setelah revisi — ' +
+                                    return '  Catatan: baris di akun ini BARU muncul setelah revisi ' +
+                                           '(pagu sebelum revisi 0) — kemungkinan besar RUP belum disesuaikan.';
+                                }
+                                if (rv.berubah) {
+                                    return '  Catatan: pagu baris di akun ini BERUBAH saat revisi — ' +
                                            'kemungkinan besar RUP belum disesuaikan.';
                                 }
                                 return '';
