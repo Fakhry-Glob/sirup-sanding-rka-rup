@@ -12,12 +12,22 @@ Dibuat untuk keperluan monitoring & evaluasi internal satker.
 ## Instalasi
 
 1. Pasang [Tampermonkey](https://www.tampermonkey.net/) di Chrome/Edge/Firefox.
-2. Buka [`sirup_exporter.user.js`](https://raw.githubusercontent.com/Fakhry-Glob/sirup-sanding-rka-rup/master/sirup_exporter.user.js)
+2. Buka [`sirup_exporter.user.js` lewat jsDelivr](https://cdn.jsdelivr.net/gh/Fakhry-Glob/sirup-sanding-rka-rup@master/sirup_exporter.user.js)
    — Tampermonkey otomatis menawarkan pemasangan.
 3. Login ke SiRUP, buka halaman mana pun di `sirup.inaproc.id/sirup/*`.
 4. Tombol **Ekspor Sanding RKA & RUP** muncul di kanan bawah.
 
 Pembaruan berikutnya ditarik otomatis oleh Tampermonkey dari branch `master`.
+
+> **Kenapa lewat jsDelivr, bukan langsung dari GitHub?**
+> Di sebagian jaringan instansi, `raw.githubusercontent.com` dan `github.com`
+> disadap atau diblokir — Chrome menolaknya dengan `NET::ERR_CERT_AUTHORITY_INVALID`,
+> dan Tampermonkey gagal menarik pembaruan tanpa pesan apa pun. jsDelivr memirror
+> isi repo ini lewat host yang lolos, sama seperti cdnjs yang dipakai `@require`.
+>
+> jsDelivr menyimpan cache branch sampai 12 jam. Setelah mendorong versi baru,
+> segarkan dengan membuka:
+> `https://purge.jsdelivr.net/gh/Fakhry-Glob/sirup-sanding-rka-rup@master/sirup_exporter.user.js`
 
 ## Cara pakai
 
